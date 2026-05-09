@@ -1,30 +1,31 @@
 # EventLight Backend
 
-Django backend for the EventLight frontend.
+Backend API for the EventLight frontend.
 
-Base API URL in development:
+This README is the frontend integration contract for the current implementation. The development API base URL is:
 
 ```text
 http://localhost:8000/api
 ```
 
-Auth uses token headers:
+The Vite frontend runs at:
 
-```http
-Authorization: Token <token>
+```text
+http://localhost:5173
 ```
 
 ## Stack
 
 - Python 3.14
 - Django
-- Django REST Framework
-- django-filter
+- Django REST Framework installed
+- django-filter installed
 - django-cors-headers
 - Pillow
 - SQLite for local development
+- Token auth using `Authorization: Token <token>`
 
-## Setup
+## Local Setup
 
 Install dependencies:
 
@@ -44,7 +45,7 @@ Create an admin user:
 pipenv run python manage.py createsuperuser
 ```
 
-Run the server:
+Run the backend:
 
 ```bash
 pipenv run python manage.py runserver 0.0.0.0:8000
@@ -57,43 +58,228 @@ pipenv run python manage.py check
 pipenv run python manage.py test
 ```
 
-## Admin Workflow
+## Frontend Defaults
 
-The Django admin is configured for operations work:
+Set the frontend API URL to:
 
-- Events are grouped into clear sections for basics, schedule, location, pricing, audience, review, ownership, and engagement.
-- `created_by` is filled automatically from the logged-in admin when an admin creates an event.
-- Event lists support bulk approve, reject, pending, feature, and unfeature actions.
-- Approval/rejection changes create organizer notifications.
-- Deleting approved events creates cancellation notifications for RSVPed users.
-- Event detail pages show image preview, RSVP count, full state, likes, saves, and inline RSVP/like/save records.
-- Categories show active state, sort order, icon key, approved event count, and total event count.
-- Notifications can be marked read/unread in bulk.
-- Users show created, liked, saved, attending, and unread notification counts.
+```env
+VITE_API_URL=http://localhost:8000/api
+```
+
+Authenticated requests must include:
+
+```http
+Authorization: Token <token>
+```
+
+Use `Content-Type: application/json` for JSON requests. Do not set `Content-Type` manually for `multipart/form-data`; let the browser set the boundary.
+
+## Response Conventions
+
+All timestamps are ISO 8601 UTC strings:
+
+```text
+2026-12-01T09:00:00Z
+```
+
+General errors:
+
+```json
+{
+  "detail": "Authentication credentials were not provided."
+}
+```
+
+Validation errors:
+
+```json
+{
+  "title": ["This field is required."]
+}
+```
+
+Unknown `/api/*` routes return JSON:
+
+```json
+{
+  "detail": "Not found."
+}
+```
+
+Paginated responses use:
+
+```json
+{
+  "count": 143,
+  "next": "http://localhost:8000/api/events/?page=2",
+  "previous": null,
+  "results": []
+}
+```
+
+Pagination defaults:
+
+- `page_size=12`
+- max `page_size=50`
 
 ## Auth
 
-| Method | Path | Auth | Description |
+### Endpoints
+
+| Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| `POST` | `/api/auth/register/` | No | Register and return `{ key, user }` |
-| `POST` | `/api/auth/login/` | No | Login and return `{ key, user }` |
+| `POST` | `/api/auth/register/` | No | Register and return token plus user |
+| `POST` | `/api/auth/login/` | No | Login and return token plus user |
 | `POST` | `/api/auth/logout/` | Yes | Invalidate current token |
 | `GET` | `/api/auth/user/` | Yes | Current user profile |
 | `PATCH` | `/api/auth/user/` | Yes | Update profile |
 | `POST` | `/api/auth/password/change/` | Yes | Change password |
-| `POST` | `/api/auth/password/reset/` | No | Password reset compatibility response |
-| `POST` | `/api/auth/password/reset/confirm/` | No | Password reset confirm compatibility response |
+| `POST` | `/api/auth/password/reset/` | No | Compatibility response |
+| `POST` | `/api/auth/password/reset/confirm/` | No | Compatibility response |
+
+### Register
+
+```http
+POST /api/auth/register/
+```
+
+Request:
+
+```json
+{
+  "email": "user@example.com",
+  "password": "password123",
+  "first_name": "Desmond",
+  "last_name": "Egya",
+  "username": "desmond_e"
+}
+```
+
+Response `201`:
+
+```json
+{
+  "key": "token_string",
+  "user": {
+    "id": 1,
+    "email": "user@example.com",
+    "first_name": "Desmond",
+    "last_name": "Egya",
+    "username": "desmond_e",
+    "phone_number": "",
+    "street_address": "",
+    "city": "",
+    "state": "",
+    "country": "Nigeria",
+    "preferred_categories": [],
+    "preferred_languages": [],
+    "preferred_age_groups": [],
+    "max_distance_km": null,
+    "email_notifications": true,
+    "event_reminders": true,
+    "date_joined": "2026-05-09T12:00:00Z",
+    "events_created_count": 0,
+    "events_liked_count": 0,
+    "events_saved_count": 0,
+    "events_attending_count": 0
+  }
+}
+```
+
+### Login
+
+```http
+POST /api/auth/login/
+```
+
+Request:
+
+```json
+{
+  "email": "user@example.com",
+  "password": "password123"
+}
+```
+
+Response `200`:
+
+```json
+{
+  "key": "token_string",
+  "user": { "...": "full user object" }
+}
+```
+
+### Current User
+
+```http
+GET /api/auth/user/
+PATCH /api/auth/user/
+```
+
+`PATCH` accepts any subset of:
+
+```json
+{
+  "first_name": "Desmond",
+  "last_name": "Egya",
+  "username": "desmond_e",
+  "phone_number": "+234 800 000 0000",
+  "street_address": "12 Church Street",
+  "city": "Lagos",
+  "state": "Lagos State",
+  "country": "Nigeria",
+  "preferred_categories": ["worship", "music"],
+  "preferred_languages": ["english", "yoruba"],
+  "preferred_age_groups": ["young_adults"],
+  "max_distance_km": 50,
+  "email_notifications": true,
+  "event_reminders": true
+}
+```
+
+Response is always the full user object.
+
+### Change Password
+
+```http
+POST /api/auth/password/change/
+```
+
+Request:
+
+```json
+{
+  "old_password": "oldpassword123",
+  "new_password1": "newpassword123",
+  "new_password2": "newpassword123"
+}
+```
+
+Response:
+
+```json
+{
+  "detail": "Password changed successfully."
+}
+```
+
+Password reset email delivery is not implemented yet. The reset endpoints currently return compatibility JSON responses.
 
 ## Categories
 
-| Method | Path | Auth | Description |
-| --- | --- | --- | --- |
-| `GET` | `/api/categories/` | No | Active categories |
-| `POST` | `/api/categories/` | Admin | Create category |
-| `PATCH` | `/api/categories/<id>/` | Admin | Update category |
-| `DELETE` | `/api/categories/<id>/` | Admin | Deactivate category |
+Categories are backend-owned. The frontend should fetch them instead of hardcoding category options.
 
-Category response:
+### Endpoints
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/categories/` | No | List active categories |
+| `POST` | `/api/categories/` | Admin token | Create category |
+| `PATCH` | `/api/categories/<id>/` | Admin token | Update category |
+| `DELETE` | `/api/categories/<id>/` | Admin token | Deactivate category |
+
+### Category Object
 
 ```json
 {
@@ -108,57 +294,59 @@ Category response:
 }
 ```
 
+Field notes:
+
+- `slug` is what the frontend sends to `GET /api/events/?category=worship`.
+- `icon` is a key the frontend maps to an icon component.
+- `events_count` counts approved events only.
+- Public `GET /api/categories/` returns active categories only.
+- `DELETE /api/categories/<id>/` deactivates the category; it does not hard-delete.
+
+Seeded categories:
+
+| Name | Slug | Icon |
+| --- | --- | --- |
+| Worship | `worship` | `heart` |
+| Music | `music` | `music` |
+| Conference | `conference` | `mic` |
+| Seminar | `seminar` | `book` |
+| Fellowship | `fellowship` | `users` |
+| Prayer | `prayer` | `sun` |
+| Youth | `youth` | `award` |
+| Outreach | `outreach` | `message` |
+| Teaching | `teaching` | `book` |
+| Children | `children` | `star` |
+
 ## Events
 
-| Method | Path | Auth | Description |
+### Endpoints
+
+| Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| `GET` | `/api/events/` | No, auth-aware | Paginated approved events |
+| `GET` | `/api/events/` | No, auth-aware | Paginated approved event list |
 | `POST` | `/api/events/` | Yes | Create pending event |
 | `GET` | `/api/events/<id>/` | No, auth-aware | Event detail |
-| `PATCH` | `/api/events/<id>/` | Owner/Admin | Update event |
-| `DELETE` | `/api/events/<id>/` | Owner/Admin | Delete event |
-| `GET` | `/api/events/<id>/related/` | No | Up to 6 related events |
+| `PATCH` | `/api/events/<id>/` | Owner or admin | Update event |
+| `DELETE` | `/api/events/<id>/` | Owner or admin | Delete event |
+| `GET` | `/api/events/<id>/related/` | No, auth-aware | Up to 6 related events |
 | `POST` | `/api/events/<id>/like/` | Yes | Toggle like |
 | `POST` | `/api/events/<id>/save/` | Yes | Toggle save |
 | `POST` | `/api/events/<id>/rsvp/` | Yes | Toggle RSVP |
-| `GET` | `/api/events/<id>/attendees/` | Owner/Admin | RSVP attendees |
+| `GET` | `/api/events/<id>/attendees/` | Owner or admin | RSVP attendee list |
 | `GET` | `/api/events/liked/` | Yes | Current user's liked events |
 | `GET` | `/api/events/saved/` | Yes | Current user's saved events |
 | `GET` | `/api/events/my-events/` | Yes | Current user's events, all statuses |
 | `GET` | `/api/events/attending/` | Yes | Current user's RSVPed events |
 
-`GET /api/events/` supports:
+`PUT` is intentionally not supported. Use `PATCH` for updates.
 
-```text
-search
-category
-pricing
-language
-age_group
-is_featured
-ordering
-page
-page_size
-```
-
-Paginated response:
-
-```json
-{
-  "count": 143,
-  "next": "http://localhost:8000/api/events/?page=2",
-  "previous": null,
-  "results": []
-}
-```
-
-Event response includes nested category and creator objects:
+### Event Object
 
 ```json
 {
   "id": 12,
   "title": "Sunday Night Worship",
-  "description": "A night of praise...",
+  "description": "A night of praise and worship.",
   "organizer": "Lagos Christian Center",
   "date": "2026-12-01T09:00:00Z",
   "end_date": "2026-12-01T12:00:00Z",
@@ -197,11 +385,257 @@ Event response includes nested category and creator objects:
 }
 ```
 
-## RSVP
+Auth-aware fields:
 
-`POST /api/events/<id>/rsvp/` toggles attendance.
+- `is_liked`
+- `is_saved`
+- `is_rsvped`
+
+For unauthenticated requests, these are returned as `false`, not omitted.
+
+### List Events
+
+```http
+GET /api/events/
+```
+
+Returns approved events only.
+
+Supported query params:
+
+| Param | Example | Notes |
+| --- | --- | --- |
+| `search` | `?search=shiloh` | Matches `title`, `description`, `location` |
+| `category` | `?category=worship` | Matches category slug |
+| `pricing` | `?pricing=free` | `free` or `paid` |
+| `language` | `?language=english` | Exact enum value |
+| `age_group` | `?age_group=young_adults` | Exact enum value |
+| `is_featured` | `?is_featured=true` | Boolean filter |
+| `ordering` | `?ordering=-date` | Supports `date`, `created_at`, `title` |
+| `page` | `?page=2` | Page number |
+| `page_size` | `?page_size=12` | Default 12, max 50 |
+
+Example:
+
+```http
+GET /api/events/?search=worship&category=worship&language=english&page=1&page_size=12
+```
 
 Response:
+
+```json
+{
+  "count": 143,
+  "next": "http://localhost:8000/api/events/?page=2",
+  "previous": null,
+  "results": [
+    { "...": "Event object" }
+  ]
+}
+```
+
+### Create Event
+
+```http
+POST /api/events/
+```
+
+Requires auth. Created events start as:
+
+```json
+{
+  "approval_status": "pending"
+}
+```
+
+They do not appear in the public event list until an admin approves them.
+
+JSON request:
+
+```json
+{
+  "title": "Sunday Night Worship",
+  "description": "A night of praise and worship.",
+  "organizer": "Lagos Christian Center",
+  "date": "2026-12-01T09:00:00Z",
+  "end_date": "2026-12-01T12:00:00Z",
+  "location": "Faith Tabernacle, Lagos",
+  "location_lat": 6.5244,
+  "location_lng": 3.3792,
+  "pricing": "free",
+  "ticket_price": null,
+  "category": "worship",
+  "language": "english",
+  "age_group": "all_ages",
+  "capacity": 500
+}
+```
+
+Required fields:
+
+- `title`
+- `description`
+- `date`
+- `location`
+- `pricing`
+- `category`
+- `language`
+- `age_group`
+
+Optional fields:
+
+- `organizer`
+- `end_date`
+- `location_lat`
+- `location_lng`
+- `ticket_price`
+- `capacity`
+- `image`
+
+Validation:
+
+- `category` must be an active category slug.
+- `end_date` must be after `date`.
+- `ticket_price` is required when `pricing` is `paid`.
+- `ticket_price` is forced to `null` when `pricing` is `free`.
+- `capacity` must be a non-negative integer when provided.
+
+Multipart request fields use the same names. Include `image=<file>` when uploading.
+
+### Update Event
+
+```http
+PATCH /api/events/<id>/
+```
+
+Owner or admin only. Accepts any subset of create fields. Admin users may also update:
+
+```json
+{
+  "approval_status": "approved",
+  "rejection_reason": "",
+  "is_featured": true
+}
+```
+
+Approval or rejection updates create a notification for the event creator.
+
+### Delete Event
+
+```http
+DELETE /api/events/<id>/
+```
+
+Owner or admin only.
+
+Response:
+
+```json
+{
+  "detail": "Event deleted successfully."
+}
+```
+
+If the event was approved, RSVPed users receive an `event_cancelled` notification.
+
+### Related Events
+
+```http
+GET /api/events/<id>/related/
+```
+
+Returns up to 6 approved events in the same category, excluding the current event.
+
+Response:
+
+```json
+{
+  "count": 4,
+  "results": [
+    { "...": "Event object" }
+  ]
+}
+```
+
+### Personal Event Collections
+
+These return flat arrays, not paginated objects:
+
+```http
+GET /api/events/liked/
+GET /api/events/saved/
+GET /api/events/my-events/
+GET /api/events/attending/
+```
+
+Notes:
+
+- `liked`, `saved`, and `attending` return approved events only.
+- `my-events` returns all statuses so creators can see pending and rejected events.
+
+## Likes And Saves
+
+### Like
+
+```http
+POST /api/events/<id>/like/
+```
+
+Response when liked:
+
+```json
+{
+  "liked": true,
+  "likes_count": 46,
+  "message": "Event liked"
+}
+```
+
+Response when unliked:
+
+```json
+{
+  "liked": false,
+  "likes_count": 45,
+  "message": "Event unliked"
+}
+```
+
+### Save
+
+```http
+POST /api/events/<id>/save/
+```
+
+Response when saved:
+
+```json
+{
+  "saved": true,
+  "saves_count": 24,
+  "message": "Event saved"
+}
+```
+
+Response when unsaved:
+
+```json
+{
+  "saved": false,
+  "saves_count": 23,
+  "message": "Event unsaved"
+}
+```
+
+## RSVP And Attendance
+
+### Toggle RSVP
+
+```http
+POST /api/events/<id>/rsvp/
+```
+
+Response when RSVP is created:
 
 ```json
 {
@@ -211,7 +645,17 @@ Response:
 }
 ```
 
-If the event has a capacity and is full:
+Response when RSVP is cancelled:
+
+```json
+{
+  "rsvped": false,
+  "rsvp_count": 86,
+  "message": "You're no longer going."
+}
+```
+
+If the event is full:
 
 ```json
 {
@@ -219,78 +663,264 @@ If the event has a capacity and is full:
 }
 ```
 
-## Notifications
+RSVP creates an `rsvp_confirmed` notification for the current user.
 
-| Method | Path | Auth | Description |
-| --- | --- | --- | --- |
-| `GET` | `/api/notifications/` | Yes | Paginated notifications |
-| `POST` | `/api/notifications/<id>/read/` | Yes | Mark one as read |
-| `POST` | `/api/notifications/read-all/` | Yes | Mark all as read |
-| `DELETE` | `/api/notifications/<id>/` | Yes | Delete notification, returns `204` |
-| `GET` | `/api/notifications/unread-count/` | Yes | Navbar unread count |
+### Attendees
 
-Notifications are created for RSVP confirmation, event approval, event rejection, and event cancellation. Scheduled reminders are model-ready but need a background worker before production.
+```http
+GET /api/events/<id>/attendees/
+```
 
-## Users
+Owner or admin only.
 
-| Method | Path | Auth | Description |
-| --- | --- | --- | --- |
-| `GET` | `/api/users/<id>/` | No | Public organizer profile |
-| `GET` | `/api/users/<id>/events/` | No, auth-aware | Paginated approved events by user |
-
-Current user profile includes dashboard counts:
+Response:
 
 ```json
 {
-  "events_created_count": 3,
-  "events_liked_count": 12,
-  "events_saved_count": 7,
-  "events_attending_count": 4
+  "count": 87,
+  "results": [
+    {
+      "id": 1,
+      "first_name": "Ada",
+      "last_name": "Obi",
+      "email": "ada@example.com",
+      "rsvped_at": "2026-11-20T10:00:00Z"
+    }
+  ]
 }
 ```
+
+## Notifications
+
+### Endpoints
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/notifications/` | Yes | Paginated notifications |
+| `POST` | `/api/notifications/<id>/read/` | Yes | Mark one notification read |
+| `POST` | `/api/notifications/read-all/` | Yes | Mark all notifications read |
+| `GET` | `/api/notifications/unread-count/` | Yes | Navbar unread badge |
+| `DELETE` | `/api/notifications/<id>/` | Yes | Delete notification |
+
+### Notification Object
+
+```json
+{
+  "id": 1,
+  "type": "reminder",
+  "title": "Event starts tomorrow",
+  "body": "Shiloh 2026 is tomorrow. Don't miss it!",
+  "detail": "You saved this event. It starts tomorrow at 9 AM.",
+  "event": {
+    "id": 12,
+    "title": "Shiloh 2026",
+    "image": "http://localhost:8000/media/events/cover.jpg"
+  },
+  "is_read": false,
+  "created_at": "2026-11-30T08:00:00Z"
+}
+```
+
+`GET /api/notifications/` supports:
+
+| Param | Example |
+| --- | --- |
+| `page` | `?page=2` |
+| `page_size` | `?page_size=12` |
+| `is_read` | `?is_read=false` |
+
+Unread count:
+
+```http
+GET /api/notifications/unread-count/
+```
+
+```json
+{
+  "count": 3
+}
+```
+
+Mark all read:
+
+```http
+POST /api/notifications/read-all/
+```
+
+```json
+{
+  "updated": 3
+}
+```
+
+Delete:
+
+```http
+DELETE /api/notifications/<id>/
+```
+
+Returns `204 No Content`.
+
+Implemented notification types:
+
+| Type | Created when |
+| --- | --- |
+| `event_approved` | Admin approves an event |
+| `event_rejected` | Admin rejects an event |
+| `rsvp_confirmed` | User RSVPs to an event |
+| `event_cancelled` | Approved event is deleted and users had RSVPed |
+
+The `reminder` and `new_event_nearby` types exist in the model but need a background worker or explicit trigger before they are generated automatically.
+
+## Public Users
+
+### Public Profile
+
+```http
+GET /api/users/<id>/
+```
+
+Response:
+
+```json
+{
+  "id": 1,
+  "first_name": "Desmond",
+  "last_name": "Egya",
+  "events_created_count": 12,
+  "date_joined": "2026-01-15T12:00:00Z"
+}
+```
+
+### Public User Events
+
+```http
+GET /api/users/<id>/events/
+```
+
+Returns a paginated list of that user's approved events. Response shape is the standard paginated event response.
 
 ## Images
 
-Event uploads accept `image/jpeg`, `image/png`, and `image/webp`.
+Event images are optional.
+
+Accepted MIME types:
+
+- `image/jpeg`
+- `image/png`
+- `image/webp`
 
 Rules:
 
-- Max file size: 10 MB
-- Images wider than 1200px are resized on upload
-- Event responses return absolute image URLs
-
-## CORS
-
-Development origins:
-
-```text
-http://localhost:5173
-```
-
-Allowed headers include `Authorization` and `Content-Type`.
-
-## Errors
-
-General errors:
-
-```json
-{
-  "detail": "Authentication credentials were not provided."
-}
-```
+- Max size is 10 MB.
+- Images wider than 1200px are resized on upload.
+- Image URLs in event responses are absolute.
 
 Validation errors:
 
 ```json
 {
-  "title": ["This field is required."]
+  "image": ["Image must not exceed 10 MB."]
 }
 ```
 
-API 404s return:
+## Enumerations
 
-```json
-{
-  "detail": "Not found."
-}
+### Pricing
+
+| Value | Display |
+| --- | --- |
+| `free` | Free |
+| `paid` | Paid |
+
+### Language
+
+| Value | Display |
+| --- | --- |
+| `english` | English |
+| `yoruba` | Yoruba |
+| `igbo` | Igbo |
+| `hausa` | Hausa |
+| `pidgin` | Pidgin |
+| `french` | French |
+| `multilingual` | Multilingual |
+
+### Age Group
+
+| Value | Display |
+| --- | --- |
+| `all_ages` | All Ages |
+| `children` | Children (0-12) |
+| `teenagers` | Teenagers (13-19) |
+| `young_adults` | Young Adults (20-35) |
+| `adults` | Adults (36-60) |
+| `seniors` | Seniors (60+) |
+
+### Approval Status
+
+| Value | Meaning |
+| --- | --- |
+| `pending` | Awaiting admin review |
+| `approved` | Publicly visible |
+| `rejected` | Rejected by admin |
+
+### Notification Type
+
+| Value |
+| --- |
+| `reminder` |
+| `event_approved` |
+| `event_rejected` |
+| `new_event_nearby` |
+| `rsvp_confirmed` |
+| `event_cancelled` |
+
+## CORS
+
+The backend allows the Vite dev origin:
+
+```text
+http://localhost:5173
 ```
+
+Allowed headers:
+
+```text
+authorization
+content-type
+```
+
+## Admin Behavior
+
+The Django admin is configured for operations:
+
+- Event forms are grouped into basics, schedule, location, pricing/capacity, audience, review, ownership, and engagement sections.
+- Admin-created events automatically set `created_by` to the logged-in admin.
+- Event lists support bulk approve, reject, pending, feature, and unfeature actions.
+- Approval and rejection create organizer notifications.
+- Deleting approved events creates cancellation notifications for RSVPed users.
+- Event detail pages show image preview, RSVP count, full state, likes, saves, and inline RSVP/like/save rows.
+- Categories show icon, sort order, active state, approved event count, and total event count.
+- Notifications support bulk mark read/unread.
+- Users show created, liked, saved, attending, and unread notification counts.
+
+## Frontend Integration Checklist
+
+- Store `key` from login/register as `authToken`.
+- Send authenticated requests with `Authorization: Token <authToken>`.
+- Read categories from `GET /api/categories/`.
+- Use `category.slug` as the event filter value.
+- Read event list data from `response.results`, not the root response.
+- Use `event.category.name` for display and `event.category.slug` for filtering.
+- Use `event.created_by.id`, `event.created_by.first_name`, and `event.created_by.last_name` for creator display.
+- Use `is_liked`, `is_saved`, and `is_rsvped` directly from event responses.
+- Use `rsvp_count` and `is_full` to render RSVP CTA state.
+- Use `GET /api/notifications/unread-count/` for the navbar badge.
+- Use `GET /api/events/my-events/` for organizer dashboards because it includes pending/rejected events.
+- Use `PATCH`, not `PUT`, for event updates.
+
+## Known Gaps
+
+- Password reset email delivery is not wired to SMTP yet.
+- Scheduled reminder notifications need a background worker before production.
+- `new_event_nearby` notification generation exists as a type but is not automated yet.
