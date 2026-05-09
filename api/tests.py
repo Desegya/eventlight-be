@@ -69,9 +69,51 @@ class ApiContractTests(TestCase):
         self.assertEqual(event['organizer'], 'Lagos Christian Center')
         self.assertEqual(event['likes_count'], 0)
 
+        second_create_response = self.client.post(
+            '/api/events/',
+            data=json.dumps(
+                {
+                    'title': 'Youth Conference',
+                    'description': 'Leadership gathering.',
+                    'organizer': 'Youth Network',
+                    'date': '2026-07-01T10:00:00Z',
+                    'location': 'Abuja',
+                    'pricing': 'paid',
+                    'category': 'youth',
+                    'event_type': 'conference',
+                    'language': 'english',
+                    'age_group': 'young_adults',
+                }
+            ),
+            content_type='application/json',
+            **auth,
+        )
+        self.assertEqual(second_create_response.status_code, 201)
+
         list_response = self.client.get('/api/events/')
         self.assertEqual(list_response.status_code, 200)
-        self.assertIsInstance(list_response.json(), list)
+        event_list = list_response.json()
+        self.assertEqual(event_list['count'], 2)
+        self.assertIsNone(event_list['next'])
+        self.assertIsNone(event_list['previous'])
+        self.assertIsInstance(event_list['results'], list)
+
+        search_response = self.client.get('/api/events/?search=conference&pricing=paid')
+        self.assertEqual(search_response.status_code, 200)
+        self.assertEqual(search_response.json()['count'], 1)
+        self.assertEqual(search_response.json()['results'][0]['title'], 'Youth Conference')
+
+        paged_response = self.client.get('/api/events/?page_size=1')
+        self.assertEqual(paged_response.status_code, 200)
+        self.assertEqual(paged_response.json()['count'], 2)
+        self.assertIsNotNone(paged_response.json()['next'])
+        self.assertIsNone(paged_response.json()['previous'])
+        self.assertEqual(len(paged_response.json()['results']), 1)
+
+        category_response = self.client.get('/api/events/?category=worship&ordering=-date&page_size=1')
+        self.assertEqual(category_response.status_code, 200)
+        self.assertEqual(category_response.json()['count'], 1)
+        self.assertEqual(category_response.json()['results'][0]['category'], 'worship')
 
         like_response = self.client.post(f'/api/events/{event["id"]}/like/', **auth)
         self.assertEqual(like_response.status_code, 200)

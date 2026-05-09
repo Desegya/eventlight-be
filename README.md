@@ -103,7 +103,7 @@ pipenv run python manage.py check
 
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
-| `GET` | `/api/events/` | No | List events as a plain JSON array |
+| `GET` | `/api/events/` | No | List approved events with search, filters, ordering, and pagination |
 | `POST` | `/api/events/` | Yes | Create event with JSON or multipart data |
 | `GET` | `/api/events/<id>/` | No | Get event detail |
 | `PUT` | `/api/events/<id>/` | Yes | Partially update event with JSON or multipart data |
@@ -139,6 +139,31 @@ Current user responses include:
 ```
 
 ## Event Shape
+
+`GET /api/events/` returns a paginated response:
+
+```json
+{
+  "count": 143,
+  "next": "http://localhost:8000/api/events/?page=2",
+  "previous": null,
+  "results": []
+}
+```
+
+Supported query parameters:
+
+| Parameter | Example |
+| --- | --- |
+| `search` | `/api/events/?search=shiloh` |
+| `category` | `/api/events/?category=worship` |
+| `pricing` | `/api/events/?pricing=free` |
+| `event_type` | `/api/events/?event_type=conference` |
+| `language` | `/api/events/?language=english` |
+| `age_group` | `/api/events/?age_group=young_adults` |
+| `ordering` | `/api/events/?ordering=-date` |
+| `page` | `/api/events/?page=2` |
+| `page_size` | `/api/events/?page_size=12` |
 
 Event responses include:
 
@@ -178,7 +203,8 @@ Uploaded event media is stored under `media/` and served by Django while `DEBUG 
 
 ## Notes
 
-- Event list endpoints return plain arrays, not paginated objects.
+- The main event list endpoint returns a paginated object with `count`, `next`, `previous`, and `results`.
+- Liked, saved, and my-events list endpoints still return plain arrays.
 - Event categories are managed in Django admin and exposed as slugs in event API responses.
 - `created_by` is the user account that created the record; `organizer` is the public organizer name typed for the event.
 - Logout and delete endpoints return JSON because the frontend calls `response.json()`.

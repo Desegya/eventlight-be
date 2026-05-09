@@ -4,6 +4,8 @@ from datetime import timezone as datetime_timezone
 from django.contrib.auth import authenticate, update_session_auth_hash
 from django.db import IntegrityError
 from django.http import JsonResponse
+from django.core.paginator import EmptyPage, Paginator
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -44,6 +46,10 @@ EVENT_FIELDS = (
 )
 
 OPTIONAL_EVENT_FIELDS = {'organizer'}
+EVENT_FILTER_FIELDS = ('category', 'pricing', 'event_type', 'language', 'age_group')
+EVENT_ORDERING_FIELDS = {'date', 'created_at', 'title'}
+DEFAULT_PAGE_SIZE = 12
+MAX_PAGE_SIZE = 50
 
 
 def json_error(detail, status=400):
@@ -131,6 +137,62 @@ def category_payload(category):
         'description': category.description,
         'is_active': category.is_active,
     }
+
+
+def positive_int(value, default):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def filtered_events(query_params):
+    events = Event.objects.filter(approval_status='approved').select_related('created_by')
+    search = (query_params.get('search') or '').strip()
+    if search:
+        events = events.filter(
+            Q(title__icontains=search)
+            | Q(description__icontains=search)
+            | Q(location__icontains=search)
+        )
+
+    for field in EVENT_FILTER_FIELDS:
+        value = (query_params.get(field) or '').strip()
+        if value:
+            events = events.filter(**{field: value})
+
+    ordering = (query_params.get('ordering') or 'date').strip()
+    normalized_ordering = ordering[1:] if ordering.startswith('-') else ordering
+    if normalized_ordering not in EVENT_ORDERING_FIELDS:
+        ordering = 'date'
+    return events.order_by(ordering)
+
+
+def paginated_events_response(request, events, user=None):
+    page_size = min(positive_int(request.GET.get('page_size'), DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE)
+    page_number = positive_int(request.GET.get('page'), 1)
+    paginator = Paginator(events, page_size)
+
+    try:
+        page = paginator.page(page_number)
+    except EmptyPage:
+        page = paginator.page(paginator.num_pages or 1)
+
+    def page_url(target_page):
+        params = request.GET.copy()
+        params['page'] = target_page
+        return request.build_absolute_uri(f'{request.path}?{params.urlencode()}')
+
+    payload = [event_payload(event, request=request, user=user) for event in page.object_list]
+    return JsonResponse(
+        {
+            'count': paginator.count,
+            'next': page_url(page.next_page_number()) if page.has_next() else None,
+            'previous': page_url(page.previous_page_number()) if page.has_previous() else None,
+            'results': payload,
+        }
+    )
 
 
 def validation_response(errors):
@@ -343,9 +405,8 @@ def events_collection(request):
 
     user = authenticate_token(request)
     if request.method == 'GET':
-        events = Event.objects.select_related('created_by').all()
-        payload = [event_payload(event, request=request, user=user) for event in events]
-        return JsonResponse(payload, safe=False)
+        events = filtered_events(request.GET)
+        return paginated_events_response(request, events, user=user)
 
     user, auth_error = require_auth(request)
     if auth_error:
