@@ -9,7 +9,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 
-from .models import AuthToken, Event, EventLike, EventSave, User
+from .models import AuthToken, Category, Event, EventLike, EventSave, User
 
 
 USER_FIELDS = (
@@ -33,6 +33,7 @@ USER_FIELDS = (
 EVENT_FIELDS = (
     'title',
     'description',
+    'organizer',
     'date',
     'location',
     'pricing',
@@ -41,6 +42,8 @@ EVENT_FIELDS = (
     'language',
     'age_group',
 )
+
+OPTIONAL_EVENT_FIELDS = {'organizer'}
 
 
 def json_error(detail, status=400):
@@ -101,6 +104,7 @@ def event_payload(event, request=None, user=None):
         'id': event.id,
         'title': event.title,
         'description': event.description,
+        'organizer': event.organizer,
         'date': event.date.isoformat().replace('+00:00', 'Z'),
         'location': event.location,
         'pricing': event.pricing,
@@ -116,6 +120,16 @@ def event_payload(event, request=None, user=None):
         'is_saved': is_saved,
         'likes_count': event.likes.count(),
         'saves_count': event.saves.count(),
+    }
+
+
+def category_payload(category):
+    return {
+        'id': category.id,
+        'name': category.name,
+        'slug': category.slug,
+        'description': category.description,
+        'is_active': category.is_active,
     }
 
 
@@ -143,8 +157,10 @@ def apply_event_data(event, data, partial=False):
     for field in EVENT_FIELDS:
         value = data.get(field)
         if value in (None, ''):
-            if not partial:
+            if not partial and field not in OPTIONAL_EVENT_FIELDS:
                 errors[field] = ['This field is required.']
+            elif field in data:
+                setattr(event, field, '')
             continue
         if field == 'date':
             try:
@@ -152,8 +168,21 @@ def apply_event_data(event, data, partial=False):
             except ValueError as exc:
                 errors[field] = [str(exc)]
                 continue
+        if field == 'category' and not Category.objects.filter(slug=value, is_active=True).exists():
+            errors[field] = ['Select a valid category.']
+            continue
         setattr(event, field, value)
     return errors
+
+
+def categories_collection(request):
+    error = require_methods(request, ['GET'])
+    if error:
+        return error
+
+    categories = Category.objects.filter(is_active=True)
+    payload = [category_payload(category) for category in categories]
+    return JsonResponse(payload, safe=False)
 
 
 @csrf_exempt

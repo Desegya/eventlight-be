@@ -10,6 +10,7 @@ urlpatterns = [
     path('auth/password/change/', views.change_password),
     path('auth/password/reset/', views.password_reset),
     path('auth/password/reset/confirm/', views.password_reset_confirm),
+    path('categories/', views.categories_collection),
     path('events/', views.events_collection),
     path('events/liked/', views.liked_events),
     path('events/saved/', views.saved_events),

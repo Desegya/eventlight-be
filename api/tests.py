@@ -32,6 +32,10 @@ class ApiContractTests(TestCase):
         self.assertEqual(user_response.status_code, 200)
         self.assertEqual(user_response.json()['country'], 'Nigeria')
 
+        categories_response = self.client.get('/api/categories/')
+        self.assertEqual(categories_response.status_code, 200)
+        self.assertEqual(categories_response.json()[0].keys(), {'id', 'name', 'slug', 'description', 'is_active'})
+
         update_response = self.client.patch(
             '/api/auth/user/',
             data=json.dumps({'city': 'Lagos', 'preferred_categories': ['worship']}),
@@ -47,6 +51,7 @@ class ApiContractTests(TestCase):
                 {
                     'title': 'Sunday Worship',
                     'description': 'Join us.',
+                    'organizer': 'Lagos Christian Center',
                     'date': '2026-06-01T10:00:00Z',
                     'location': 'Lagos',
                     'pricing': 'free',
@@ -61,6 +66,7 @@ class ApiContractTests(TestCase):
         )
         self.assertEqual(create_response.status_code, 201)
         event = create_response.json()
+        self.assertEqual(event['organizer'], 'Lagos Christian Center')
         self.assertEqual(event['likes_count'], 0)
 
         list_response = self.client.get('/api/events/')

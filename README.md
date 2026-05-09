@@ -93,6 +93,12 @@ pipenv run python manage.py check
 | `POST` | `/api/auth/password/reset/` | No | Password reset placeholder |
 | `POST` | `/api/auth/password/reset/confirm/` | No | Password reset confirm placeholder |
 
+### Categories
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `GET` | `/api/categories/` | No | List active admin-managed event categories |
+
 ### Events
 
 | Method | Path | Auth | Description |
@@ -141,6 +147,7 @@ Event responses include:
   "id": 1,
   "title": "Sunday Worship Service",
   "description": "Join us for worship.",
+  "organizer": "Lagos Christian Center",
   "date": "2026-06-01T10:00:00Z",
   "location": "Lagos Christian Center",
   "pricing": "free",
@@ -172,6 +179,8 @@ Uploaded event media is stored under `media/` and served by Django while `DEBUG 
 ## Notes
 
 - Event list endpoints return plain arrays, not paginated objects.
+- Event categories are managed in Django admin and exposed as slugs in event API responses.
+- `created_by` is the user account that created the record; `organizer` is the public organizer name typed for the event.
 - Logout and delete endpoints return JSON because the frontend calls `response.json()`.
 - Password reset endpoints currently return compatibility responses only; email delivery is not implemented.
 - The SQLite database is local development storage.
