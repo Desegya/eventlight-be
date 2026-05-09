@@ -26,3 +26,6 @@ urlpatterns = [
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
+handler404 = 'api.views.api_not_found'
+handler500 = 'api.views.api_server_error'

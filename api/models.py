@@ -1,6 +1,7 @@
 import secrets
 
 from django.contrib.auth.models import AbstractUser
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
@@ -41,13 +42,15 @@ class AuthToken(models.Model):
 class Category(models.Model):
     name = models.CharField(max_length=120)
     slug = models.SlugField(max_length=80, unique=True)
+    icon = models.CharField(max_length=40, default='zap')
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['name']
+        ordering = ['sort_order', 'name']
         verbose_name_plural = 'categories'
 
     def __str__(self):
@@ -64,20 +67,43 @@ class Event(models.Model):
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
     )
+    LANGUAGE_CHOICES = (
+        ('english', 'English'),
+        ('yoruba', 'Yoruba'),
+        ('igbo', 'Igbo'),
+        ('hausa', 'Hausa'),
+        ('pidgin', 'Pidgin'),
+        ('french', 'French'),
+        ('multilingual', 'Multilingual'),
+    )
+    AGE_GROUP_CHOICES = (
+        ('all_ages', 'All Ages'),
+        ('children', 'Children (0-12)'),
+        ('teenagers', 'Teenagers (13-19)'),
+        ('young_adults', 'Young Adults (20-35)'),
+        ('adults', 'Adults (36-60)'),
+        ('seniors', 'Seniors (60+)'),
+    )
 
     title = models.CharField(max_length=255)
     description = models.TextField()
     organizer = models.CharField(max_length=255, blank=True)
     date = models.DateTimeField()
+    end_date = models.DateTimeField(null=True, blank=True)
     location = models.CharField(max_length=255)
+    location_lat = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    location_lng = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     pricing = models.CharField(max_length=20, choices=PRICING_CHOICES)
-    category = models.CharField(max_length=80)
-    event_type = models.CharField(max_length=80)
-    language = models.CharField(max_length=80)
-    age_group = models.CharField(max_length=80)
+    ticket_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    category = models.ForeignKey(Category, related_name='events', on_delete=models.PROTECT)
+    language = models.CharField(max_length=80, choices=LANGUAGE_CHOICES)
+    age_group = models.CharField(max_length=80, choices=AGE_GROUP_CHOICES)
+    capacity = models.PositiveIntegerField(null=True, blank=True)
     created_by = models.ForeignKey(User, related_name='events', on_delete=models.CASCADE)
-    approval_status = models.CharField(max_length=20, choices=APPROVAL_CHOICES, default='approved')
-    image = models.FileField(upload_to='events/', null=True, blank=True)
+    approval_status = models.CharField(max_length=20, choices=APPROVAL_CHOICES, default='pending')
+    rejection_reason = models.TextField(blank=True)
+    is_featured = models.BooleanField(default=False)
+    image = models.ImageField(upload_to='events/', null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -86,6 +112,25 @@ class Event(models.Model):
 
     def __str__(self):
         return self.title
+
+    def clean(self):
+        errors = {}
+        if self.end_date and self.date and self.end_date <= self.date:
+            errors['end_date'] = ['End date must be after start date.']
+        if self.pricing == 'paid' and self.ticket_price is None:
+            errors['ticket_price'] = ['This field is required when pricing is paid.']
+        if self.pricing == 'free' and self.ticket_price is not None:
+            self.ticket_price = None
+        if errors:
+            raise ValidationError(errors)
+
+    @property
+    def rsvp_count(self):
+        return self.rsvps.count()
+
+    @property
+    def is_full(self):
+        return self.capacity is not None and self.rsvp_count >= self.capacity
 
 
 class EventLike(models.Model):
@@ -108,5 +153,45 @@ class EventSave(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['user', 'event'], name='unique_event_save'),
         ]
+
+
+class RSVP(models.Model):
+    user = models.ForeignKey(User, related_name='event_rsvps', on_delete=models.CASCADE)
+    event = models.ForeignKey(Event, related_name='rsvps', on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'event'], name='unique_event_rsvp'),
+        ]
+
+    def __str__(self):
+        return f'{self.user_id}:{self.event_id}'
+
+
+class Notification(models.Model):
+    TYPE_CHOICES = (
+        ('reminder', 'Reminder'),
+        ('event_approved', 'Event approved'),
+        ('event_rejected', 'Event rejected'),
+        ('new_event_nearby', 'New event nearby'),
+        ('rsvp_confirmed', 'RSVP confirmed'),
+        ('event_cancelled', 'Event cancelled'),
+    )
+
+    user = models.ForeignKey(User, related_name='notifications', on_delete=models.CASCADE)
+    type = models.CharField(max_length=40, choices=TYPE_CHOICES)
+    title = models.CharField(max_length=160)
+    body = models.CharField(max_length=255)
+    detail = models.TextField(blank=True)
+    event = models.ForeignKey(Event, related_name='notifications', on_delete=models.SET_NULL, null=True, blank=True)
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title
 
 # Create your models here.
