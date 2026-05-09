@@ -58,6 +58,14 @@ pipenv run python manage.py check
 pipenv run python manage.py test
 ```
 
+Seed local demo data:
+
+```bash
+pipenv run python manage.py seed_demo_data --clear
+```
+
+This creates demo categories, users, approved/pending/rejected events, RSVPs, likes, saves, and notifications. Demo users use `password123` and emails ending in `@eventlight.test`.
+
 ## Frontend Defaults
 
 Set the frontend API URL to:
