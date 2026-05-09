@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Pipenv
+# Keep Pipfile.lock committed for reproducible installs.
+
+# Test and coverage output
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Type checkers and tooling caches
+.mypy_cache/
+.ruff_cache/
+.pyre/
+
+# Editors and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
