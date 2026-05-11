@@ -1,10 +1,14 @@
 import json
+import secrets
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from datetime import timezone as datetime_timezone
 
+from django.conf import settings
 from django.contrib.auth import authenticate, update_session_auth_hash
 from django.core.files.base import ContentFile
+from django.core.mail import send_mail
 from django.core.paginator import EmptyPage, Paginator
 from django.db import IntegrityError
 from django.db.models import Q
@@ -15,7 +19,7 @@ from django.utils.text import slugify
 from django.views.decorators.csrf import csrf_exempt
 from PIL import Image, UnidentifiedImageError
 
-from .models import AuthToken, Category, Event, EventLike, EventSave, Notification, RSVP, User
+from .models import AuthToken, Category, Event, EventLike, EventSave, Notification, PasswordResetToken, RSVP, User
 
 
 USER_WRITABLE_FIELDS = (
@@ -630,7 +634,36 @@ def password_reset(request):
     error = require_methods(request, ['POST'])
     if error:
         return error
-    return JsonResponse({'detail': 'Password reset email sent.'})
+
+    data = parse_body(request)
+    if data is None:
+        return json_error('Invalid JSON.', status=400)
+
+    email = (data.get('email') or '').strip().lower()
+    if not email:
+        return validation_response({'email': ['This field is required.']})
+
+    # Always respond the same way — don't leak whether the email exists
+    user = User.objects.filter(email=email).first()
+    if user:
+        token = secrets.token_urlsafe(32)
+        PasswordResetToken.objects.create(user=user, token=token)
+        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}"
+        send_mail(
+            subject='Reset your EventLight password',
+            message=(
+                f'Hi {user.first_name or user.email},\n\n'
+                f'Click the link below to reset your password. '
+                f'This link expires in 1 hour.\n\n'
+                f'{reset_url}\n\n'
+                f'If you did not request this, you can ignore this email.'
+            ),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[user.email],
+            fail_silently=True,
+        )
+
+    return JsonResponse({'detail': 'If that email is registered, a reset link has been sent.'})
 
 
 @csrf_exempt
@@ -638,7 +671,47 @@ def password_reset_confirm(request):
     error = require_methods(request, ['POST'])
     if error:
         return error
-    return JsonResponse({'detail': 'Password reset complete.'})
+
+    data = parse_body(request)
+    if data is None:
+        return json_error('Invalid JSON.', status=400)
+
+    token_value = (data.get('token') or '').strip()
+    new_password1 = data.get('new_password1') or ''
+    new_password2 = data.get('new_password2') or ''
+
+    errors = {}
+    if not token_value:
+        errors['token'] = ['This field is required.']
+    if not new_password1:
+        errors['new_password1'] = ['This field is required.']
+    if errors:
+        return validation_response(errors)
+
+    if new_password1 != new_password2:
+        return validation_response({'new_password2': ['The two password fields did not match.']})
+
+    pw_errors = password_errors(new_password1)
+    if pw_errors:
+        return validation_response({'new_password1': pw_errors})
+
+    reset_token = (
+        PasswordResetToken.objects
+        .select_related('user')
+        .filter(token=token_value, is_used=False)
+        .first()
+    )
+    expiry = timedelta(seconds=settings.PASSWORD_RESET_TIMEOUT_SECONDS)
+    if not reset_token or (timezone.now() - reset_token.created_at) > expiry:
+        return validation_response({'token': ['This reset link is invalid or has expired.']})
+
+    reset_token.is_used = True
+    reset_token.save(update_fields=['is_used'])
+
+    reset_token.user.set_password(new_password1)
+    reset_token.user.save()
+
+    return JsonResponse({'detail': 'Password reset complete. You can now log in.'})
 
 
 @csrf_exempt
