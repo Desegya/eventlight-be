@@ -11,6 +11,7 @@ django-cors-headers = "*"
 pillow = "*"
 python-dotenv = "*"
 django-rest-knox = "*"
+requests = "*"
 
 [dev-packages]
 
