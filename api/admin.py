@@ -80,7 +80,8 @@ class EventSaveInline(admin.TabularInline):
 
 @admin.register(User)
 class CustomUserAdmin(UserAdmin):
-    fieldsets = UserAdmin.fieldsets + (
+    fieldsets = [
+        *UserAdmin.fieldsets,
         (
             'Profile',
             {
@@ -111,7 +112,7 @@ class CustomUserAdmin(UserAdmin):
                 )
             },
         ),
-    )
+    ]
     readonly_fields = (
         'events_created_count',
         'events_liked_count',
