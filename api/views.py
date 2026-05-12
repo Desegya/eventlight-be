@@ -8,7 +8,7 @@ from datetime import timezone as datetime_timezone
 from django.conf import settings
 from django.contrib.auth import authenticate, update_session_auth_hash
 from django.core.files.base import ContentFile
-from django.core.mail import send_mail
+import requests as http_requests
 from django.template.loader import render_to_string
 from django.core.paginator import EmptyPage, Paginator
 from django.db import IntegrityError
@@ -397,17 +397,31 @@ def get_visible_event(event_id, user=None):
     return None
 
 
-def send_template_email(subject, template_name, context, recipient):
+def send_template_email(subject, template_name, context, recipient, recipient_name=''):
+    api_key = settings.ZEPTOMAIL_API_KEY
+    if not api_key:
+        return
     html = render_to_string(f'api/emails/{template_name}.html', context)
     text = render_to_string(f'api/emails/{template_name}.txt', context)
-    send_mail(
-        subject=subject,
-        message=text,
-        html_message=html,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[recipient],
-        fail_silently=True,
-    )
+    try:
+        http_requests.post(
+            'https://api.zeptomail.com/v1.1/email',
+            json={
+                'from': {'address': settings.ZEPTOMAIL_FROM_ADDRESS, 'name': settings.ZEPTOMAIL_FROM_NAME},
+                'to': [{'email_address': {'address': recipient, 'name': recipient_name or recipient}}],
+                'subject': subject,
+                'htmlbody': html,
+                'textbody': text,
+            },
+            headers={
+                'accept': 'application/json',
+                'content-type': 'application/json',
+                'authorization': api_key,
+            },
+            timeout=10,
+        )
+    except Exception:
+        pass
 
 
 def create_notification(user, type_, title, body, detail='', event=None):

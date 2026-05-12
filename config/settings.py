@@ -134,14 +134,10 @@ REST_KNOX = {
     'AUTO_REFRESH': True,
 }
 
-# Email — ZeptoMail SMTP
-EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
-EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.zeptomail.com')
-EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
-EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
-DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'EventLight <noreply@eventlight.app>')
+# Email — ZeptoMail REST API
+ZEPTOMAIL_API_KEY = os.environ.get('ZEPTOMAIL_API_KEY', '')
+ZEPTOMAIL_FROM_ADDRESS = os.environ.get('ZEPTOMAIL_FROM_ADDRESS', 'noreply@dezzi.dev')
+ZEPTOMAIL_FROM_NAME = os.environ.get('ZEPTOMAIL_FROM_NAME', 'EventLight')
 
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
 
