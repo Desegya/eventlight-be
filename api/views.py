@@ -400,11 +400,12 @@ def get_visible_event(event_id, user=None):
 def send_template_email(subject, template_name, context, recipient, recipient_name=''):
     api_key = settings.ZEPTOMAIL_API_KEY
     if not api_key:
+        print('[email] ZEPTOMAIL_API_KEY not set — skipping')
         return
     html = render_to_string(f'api/emails/{template_name}.html', context)
     text = render_to_string(f'api/emails/{template_name}.txt', context)
     try:
-        http_requests.post(
+        resp = http_requests.post(
             'https://api.zeptomail.com/v1.1/email',
             json={
                 'from': {'address': settings.ZEPTOMAIL_FROM_ADDRESS, 'name': settings.ZEPTOMAIL_FROM_NAME},
@@ -420,8 +421,9 @@ def send_template_email(subject, template_name, context, recipient, recipient_na
             },
             timeout=10,
         )
-    except Exception:
-        pass
+        print(f'[email] {template_name} → {recipient} | {resp.status_code} {resp.text}')
+    except Exception as e:
+        print(f'[email] failed to send {template_name} → {recipient} | {e}')
 
 
 def create_notification(user, type_, title, body, detail='', event=None):
