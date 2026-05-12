@@ -19,7 +19,10 @@ from django.utils.text import slugify
 from django.views.decorators.csrf import csrf_exempt
 from PIL import Image, UnidentifiedImageError
 
-from .models import AuthToken, Category, Event, EventLike, EventSave, Notification, PasswordResetToken, RSVP, User
+from knox.auth import TokenAuthentication
+from knox.models import AuthToken as KnoxAuthToken
+
+from .models import Category, Event, EventLike, EventSave, Notification, PasswordResetToken, RSVP, User
 
 
 USER_WRITABLE_FIELDS = (
@@ -105,12 +108,11 @@ def parse_body(request):
 
 
 def authenticate_token(request):
-    header = request.headers.get('Authorization', '')
-    if not header.startswith('Token '):
+    try:
+        result = TokenAuthentication().authenticate(request)
+        return result[0] if result else None
+    except Exception:
         return None
-    key = header.split(' ', 1)[1].strip()
-    token = AuthToken.objects.select_related('user').filter(key=key).first()
-    return token.user if token else None
 
 
 def require_auth(request):
@@ -533,8 +535,8 @@ def register(request):
     except IntegrityError:
         return validation_response({'email': ['A user with this email or username already exists.']})
 
-    token = AuthToken.create_for_user(user)
-    return JsonResponse({'key': token.key, 'user': user_payload(user)}, status=201)
+    _, token = KnoxAuthToken.objects.create(user=user)  # type: ignore[misc]
+    return JsonResponse({'key': token, 'user': user_payload(user)}, status=201)
 
 
 @csrf_exempt
@@ -553,8 +555,8 @@ def login(request):
     if not user:
         return json_error('Invalid credentials.', status=400)
 
-    token = AuthToken.create_for_user(user)
-    return JsonResponse({'key': token.key, 'user': user_payload(user)})
+    _, token = KnoxAuthToken.objects.create(user=user)  # type: ignore[misc]
+    return JsonResponse({'key': token, 'user': user_payload(user)})
 
 
 @csrf_exempt
@@ -563,13 +565,16 @@ def logout(request):
     if error:
         return error
 
-    user, auth_error = require_auth(request)
+    _, auth_error = require_auth(request)
     if auth_error:
         return auth_error
 
-    header = request.headers.get('Authorization', '')
-    key = header.split(' ', 1)[1].strip()
-    AuthToken.objects.filter(user=user, key=key).delete()
+    try:
+        result = TokenAuthentication().authenticate(request)
+        if result:
+            result[1].delete()
+    except Exception:
+        pass
     return JsonResponse({'detail': 'Logged out successfully.'})
 
 

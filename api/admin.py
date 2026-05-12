@@ -2,7 +2,7 @@ from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin
 from django.utils.html import format_html
 
-from .models import AuthToken, Category, Event, EventLike, EventSave, Notification, RSVP, User
+from .models import Category, Event, EventLike, EventSave, Notification, RSVP, User
 
 
 admin.site.site_header = 'EventLight Admin'
@@ -385,14 +385,3 @@ class EventSaveAdmin(admin.ModelAdmin):
     date_hierarchy = 'created_at'
 
 
-@admin.register(AuthToken)
-class AuthTokenAdmin(admin.ModelAdmin):
-    list_display = ('id', 'user', 'created_at', 'key_preview')
-    list_filter = ('created_at',)
-    search_fields = ('user__email', 'user__first_name', 'user__last_name', 'key')
-    autocomplete_fields = ('user',)
-    readonly_fields = ('key', 'created_at')
-
-    @admin.display(description='Token')
-    def key_preview(self, obj):
-        return f'{obj.key[:10]}...' if obj.key else ''

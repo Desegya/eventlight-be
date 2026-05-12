@@ -21,6 +21,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'django_filters',
     'rest_framework',
+    'knox',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -125,6 +126,12 @@ CORS_ALLOW_HEADERS = [
 REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 12,
+}
+
+from datetime import timedelta
+REST_KNOX = {
+    'TOKEN_TTL': timedelta(days=30),
+    'AUTO_REFRESH': True,
 }
 
 # Email — ZeptoMail SMTP
