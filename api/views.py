@@ -9,6 +9,7 @@ from django.conf import settings
 from django.contrib.auth import authenticate, update_session_auth_hash
 from django.core.files.base import ContentFile
 from django.core.mail import send_mail
+from django.template.loader import render_to_string
 from django.core.paginator import EmptyPage, Paginator
 from django.db import IntegrityError
 from django.db.models import Q
@@ -396,6 +397,19 @@ def get_visible_event(event_id, user=None):
     return None
 
 
+def send_template_email(subject, template_name, context, recipient):
+    html = render_to_string(f'api/emails/{template_name}.html', context)
+    text = render_to_string(f'api/emails/{template_name}.txt', context)
+    send_mail(
+        subject=subject,
+        message=text,
+        html_message=html,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[recipient],
+        fail_silently=True,
+    )
+
+
 def create_notification(user, type_, title, body, detail='', event=None):
     return Notification.objects.create(
         user=user,
@@ -536,6 +550,17 @@ def register(request):
         return validation_response({'email': ['A user with this email or username already exists.']})
 
     _, token = KnoxAuthToken.objects.create(user=user)  # type: ignore[misc]
+
+    send_template_email(
+        subject=f'Welcome to EventLight, {user.first_name or user.email}!',
+        template_name='welcome',
+        context={
+            'first_name': user.first_name or user.email,
+            'browse_url': f'{settings.FRONTEND_URL}/',
+        },
+        recipient=user.email,
+    )
+
     return JsonResponse({'key': token, 'user': user_payload(user)}, status=201)
 
 
@@ -654,18 +679,14 @@ def password_reset(request):
         token = secrets.token_urlsafe(32)
         PasswordResetToken.objects.create(user=user, token=token)
         reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}"
-        send_mail(
+        send_template_email(
             subject='Reset your EventLight password',
-            message=(
-                f'Hi {user.first_name or user.email},\n\n'
-                f'Click the link below to reset your password. '
-                f'This link expires in 1 hour.\n\n'
-                f'{reset_url}\n\n'
-                f'If you did not request this, you can ignore this email.'
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            fail_silently=True,
+            template_name='password_reset',
+            context={
+                'first_name': user.first_name or user.email,
+                'reset_url': reset_url,
+            },
+            recipient=user.email,
         )
 
     return JsonResponse({'detail': 'If that email is registered, a reset link has been sent.'})
@@ -846,14 +867,18 @@ def event_detail(request, event_id):
 
     if request.method == 'DELETE':
         if event.approval_status == 'approved':
+            event_date = iso_datetime(event.date) or ''
+            browse_url = f'{settings.FRONTEND_URL}/'
             for rsvp in event.rsvps.select_related('user'):
-                create_notification(
-                    rsvp.user,
-                    'event_cancelled',
-                    'Event cancelled',
-                    f'{event.title} has been cancelled.',
-                    event=event,
-                )
+                attendee = rsvp.user
+                create_notification(attendee, 'event_cancelled', 'Event cancelled', f'{event.title} has been cancelled.', event=event)
+                if attendee.email_notifications:
+                    send_template_email(
+                        subject=f'Event cancelled — {event.title}',
+                        template_name='event_cancelled',
+                        context={'first_name': attendee.first_name or attendee.email, 'event_title': event.title, 'event_date': event_date, 'event_location': event.location, 'browse_url': browse_url},
+                        recipient=attendee.email,
+                    )
         event.delete()
         return JsonResponse({'detail': 'Event deleted successfully.'})
 
@@ -874,23 +899,27 @@ def event_detail(request, event_id):
     event.save()
 
     if user.is_staff and old_status != event.approval_status:
+        organizer = event.created_by
+        event_url = f'{settings.FRONTEND_URL}/events/{event.id}'
+        event_date = iso_datetime(event.date) or ''
         if event.approval_status == 'approved':
-            create_notification(
-                event.created_by,
-                'event_approved',
-                'Event approved',
-                f'{event.title} has been approved.',
-                event=event,
-            )
+            create_notification(organizer, 'event_approved', 'Event approved', f'{event.title} has been approved.', event=event)
+            if organizer.email_notifications:
+                send_template_email(
+                    subject=f'Your event has been approved — {event.title}',
+                    template_name='event_approved',
+                    context={'first_name': organizer.first_name or organizer.email, 'event_title': event.title, 'event_date': event_date, 'event_url': event_url},
+                    recipient=organizer.email,
+                )
         elif event.approval_status == 'rejected':
-            create_notification(
-                event.created_by,
-                'event_rejected',
-                'Event rejected',
-                f'{event.title} was rejected.',
-                detail=event.rejection_reason,
-                event=event,
-            )
+            create_notification(organizer, 'event_rejected', 'Event rejected', f'{event.title} was rejected.', detail=event.rejection_reason, event=event)
+            if organizer.email_notifications:
+                send_template_email(
+                    subject=f'Update on your event — {event.title}',
+                    template_name='event_rejected',
+                    context={'first_name': organizer.first_name or organizer.email, 'event_title': event.title, 'rejection_reason': event.rejection_reason, 'event_url': event_url},
+                    recipient=organizer.email,
+                )
 
     return JsonResponse(event_payload(event, request=request, user=user))
 
@@ -968,6 +997,7 @@ def toggle_rsvp(request, event_id):
     user, auth_error = require_auth(request)
     if auth_error:
         return auth_error
+    assert user is not None
 
     event = get_visible_event(event_id, user=user)
     if not event:
@@ -988,13 +1018,14 @@ def toggle_rsvp(request, event_id):
         return json_error('This event is at full capacity.', status=400)
 
     RSVP.objects.create(user=user, event=event)
-    create_notification(
-        user,
-        'rsvp_confirmed',
-        "You're going!",
-        f'Your RSVP for {event.title} is confirmed.',
-        event=event,
-    )
+    create_notification(user, 'rsvp_confirmed', "You're going!", f'Your RSVP for {event.title} is confirmed.', event=event)
+    if user.email_notifications:
+        send_template_email(
+            subject=f"You're going to {event.title}!",
+            template_name='rsvp_confirmed',
+            context={'first_name': user.first_name or user.email, 'event_title': event.title, 'event_date': iso_datetime(event.date) or '', 'event_location': event.location, 'event_url': f'{settings.FRONTEND_URL}/events/{event.id}'},
+            recipient=user.email,
+        )
     return JsonResponse(
         {
             'rsvped': True,

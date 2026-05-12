@@ -1,0 +1,81 @@
+{% extends "api/emails/base.html" %}
+
+{% block subject %}Welcome to EventLight, {{ first_name }}!{% endblock %}
+
+{% block body %}
+  <p style="margin:0 0 8px;font-size:24px;font-weight:800;letter-spacing:-0.03em;color:#0F172A;line-height:1.2;">
+    Welcome to EventLight 🎉
+  </p>
+  <p style="margin:0 0 28px;font-size:15px;color:#64748B;line-height:1.6;">
+    Hi {{ first_name }},
+  </p>
+  <p style="margin:0 0 24px;font-size:15px;color:#334155;line-height:1.7;">
+    Your account is all set. EventLight is your home for discovering, saving, and attending events that match your passions — concerts, workshops, conferences, fellowships, and more.
+  </p>
+
+  <!-- Feature highlights -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:28px;">
+    <tr>
+      <td style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:14px;padding:24px;">
+
+        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:16px;">
+          <tr>
+            <td style="width:36px;vertical-align:top;">
+              <div style="width:32px;height:32px;background:#EDE9FE;border-radius:8px;text-align:center;line-height:32px;font-size:15px;">🔍</div>
+            </td>
+            <td style="padding-left:12px;vertical-align:top;">
+              <p style="margin:0 0 2px;font-size:14px;font-weight:700;color:#0F172A;">Discover events near you</p>
+              <p style="margin:0;font-size:13px;color:#64748B;line-height:1.5;">Search and filter by category, language, and more.</p>
+            </td>
+          </tr>
+        </table>
+
+        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:16px;">
+          <tr>
+            <td style="width:36px;vertical-align:top;">
+              <div style="width:32px;height:32px;background:#EDE9FE;border-radius:8px;text-align:center;line-height:32px;font-size:15px;">🔖</div>
+            </td>
+            <td style="padding-left:12px;vertical-align:top;">
+              <p style="margin:0 0 2px;font-size:14px;font-weight:700;color:#0F172A;">Save events for later</p>
+              <p style="margin:0;font-size:13px;color:#64748B;line-height:1.5;">Bookmark anything that catches your eye.</p>
+            </td>
+          </tr>
+        </table>
+
+        <table width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td style="width:36px;vertical-align:top;">
+              <div style="width:32px;height:32px;background:#EDE9FE;border-radius:8px;text-align:center;line-height:32px;font-size:15px;">✅</div>
+            </td>
+            <td style="padding-left:12px;vertical-align:top;">
+              <p style="margin:0 0 2px;font-size:14px;font-weight:700;color:#0F172A;">RSVP in one tap</p>
+              <p style="margin:0;font-size:13px;color:#64748B;line-height:1.5;">Reserve your spot and get reminders automatically.</p>
+            </td>
+          </tr>
+        </table>
+
+      </td>
+    </tr>
+  </table>
+
+  <!-- CTA -->
+  <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:28px;">
+    <tr>
+      <td style="background:#7C3AED;border-radius:12px;">
+        <a href="{{ browse_url }}"
+           style="display:block;padding:14px 32px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;letter-spacing:-0.01em;white-space:nowrap;">
+          Explore events &rarr;
+        </a>
+      </td>
+    </tr>
+  </table>
+
+  <!-- Divider -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;">
+    <tr><td style="border-top:1px solid #E2E8F0;font-size:0;">&nbsp;</td></tr>
+  </table>
+
+  <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6;">
+    Have a question? Reply to this email and we&rsquo;ll be happy to help.
+  </p>
+{% endblock %}

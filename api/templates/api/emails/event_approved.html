@@ -1,0 +1,55 @@
+{% extends "api/emails/base.html" %}
+
+{% block subject %}Your event has been approved — {{ event_title }}{% endblock %}
+
+{% block body %}
+  <!-- Status badge -->
+  <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:20px;">
+    <tr>
+      <td style="background:#DCFCE7;border-radius:999px;padding:5px 14px;">
+        <span style="font-size:12px;font-weight:700;color:#16A34A;letter-spacing:0.02em;">&#10003;&nbsp; Approved</span>
+      </td>
+    </tr>
+  </table>
+
+  <p style="margin:0 0 8px;font-size:24px;font-weight:800;letter-spacing:-0.03em;color:#0F172A;line-height:1.2;">
+    Your event is live!
+  </p>
+  <p style="margin:0 0 28px;font-size:15px;color:#64748B;line-height:1.6;">
+    Hi {{ first_name }},
+  </p>
+  <p style="margin:0 0 24px;font-size:15px;color:#334155;line-height:1.7;">
+    Great news — your event has been reviewed and approved. It&rsquo;s now live on EventLight and visible to everyone.
+  </p>
+
+  <!-- Event card -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:14px;margin-bottom:28px;">
+    <tr>
+      <td style="padding:20px 24px;">
+        <p style="margin:0 0 4px;font-size:17px;font-weight:700;color:#0F172A;letter-spacing:-0.02em;">{{ event_title }}</p>
+        <p style="margin:0;font-size:13px;color:#64748B;">{{ event_date }}</p>
+      </td>
+    </tr>
+  </table>
+
+  <!-- CTA -->
+  <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:28px;">
+    <tr>
+      <td style="background:#7C3AED;border-radius:12px;">
+        <a href="{{ event_url }}"
+           style="display:block;padding:14px 32px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;letter-spacing:-0.01em;white-space:nowrap;">
+          View your event &rarr;
+        </a>
+      </td>
+    </tr>
+  </table>
+
+  <!-- Divider -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;">
+    <tr><td style="border-top:1px solid #E2E8F0;font-size:0;">&nbsp;</td></tr>
+  </table>
+
+  <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6;">
+    Share your event link with your audience to start getting RSVPs.
+  </p>
+{% endblock %}

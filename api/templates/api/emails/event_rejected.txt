@@ -1,0 +1,12 @@
+Hi {{ first_name }},
+
+We reviewed your event "{{ event_title }}" and it wasn't approved at this time.
+
+{% if rejection_reason %}Feedback from our team:
+{{ rejection_reason }}
+
+{% endif %}You can update your event and resubmit it for review.
+
+Edit your event: {{ event_url }}
+
+— The EventLight Team

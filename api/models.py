@@ -81,6 +81,7 @@ class Event(models.Model):
         ('seniors', 'Seniors (60+)'),
     )
 
+    id: int
     title = models.CharField(max_length=255)
     description = models.TextField()
     organizer = models.CharField(max_length=255, blank=True)

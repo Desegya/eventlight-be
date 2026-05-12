@@ -1,0 +1,16 @@
+Hi {{ first_name }},
+
+Welcome to EventLight! Your account is all set.
+
+EventLight is your home for discovering, saving, and attending events that match your passions.
+
+Here's what you can do:
+- Discover events near you — search and filter by category, language, and more
+- Save events for later — bookmark anything that catches your eye
+- RSVP in one tap — reserve your spot and get reminders automatically
+
+Start exploring: {{ browse_url }}
+
+Have a question? Reply to this email and we'll be happy to help.
+
+— The EventLight Team

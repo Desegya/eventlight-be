@@ -1,0 +1,13 @@
+Hi {{ first_name }},
+
+Your RSVP for "{{ event_title }}" is confirmed! Your spot is reserved.
+
+Event: {{ event_title }}
+Date: {{ event_date }}
+Location: {{ event_location }}
+
+View event details: {{ event_url }}
+
+We'll send you a reminder before the event starts. Changed your mind? You can cancel your RSVP anytime from the event page.
+
+— The EventLight Team

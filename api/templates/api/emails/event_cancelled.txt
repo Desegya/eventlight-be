@@ -1,0 +1,13 @@
+Hi {{ first_name }},
+
+Unfortunately, the organiser has cancelled the event you RSVPed to.
+
+Event: {{ event_title }}
+Date: {{ event_date }}
+Location: {{ event_location }}
+
+Your RSVP has been automatically removed. No action is needed on your part.
+
+Discover other events happening near you: {{ browse_url }}
+
+— The EventLight Team

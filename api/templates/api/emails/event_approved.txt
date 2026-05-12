@@ -1,0 +1,9 @@
+Hi {{ first_name }},
+
+Great news — your event "{{ event_title }}" has been reviewed and approved. It's now live on EventLight and visible to everyone.
+
+View your event: {{ event_url }}
+
+Share this link with your audience to start getting RSVPs.
+
+— The EventLight Team
