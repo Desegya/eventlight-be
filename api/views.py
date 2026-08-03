@@ -1,4 +1,5 @@
 import json
+import logging
 import secrets
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
@@ -18,12 +19,15 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.utils.text import slugify
 from django.views.decorators.csrf import csrf_exempt
+from django_ratelimit.decorators import ratelimit
 from PIL import Image, UnidentifiedImageError
 
 from knox.auth import TokenAuthentication
 from knox.models import AuthToken as KnoxAuthToken
 
 from .models import Category, Event, EventLike, EventSave, Notification, PasswordResetToken, RSVP, User
+
+logger = logging.getLogger('api')
 
 
 USER_WRITABLE_FIELDS = (
@@ -404,7 +408,7 @@ def send_template_email(subject, template_name, context, recipient, recipient_na
     html = render_to_string(f'api/emails/{template_name}.html', context)
     text = render_to_string(f'api/emails/{template_name}.txt', context)
     try:
-        http_requests.post(
+        response = http_requests.post(
             'https://api.zeptomail.com/v1.1/email',
             json={
                 'from': {'address': settings.ZEPTOMAIL_FROM_ADDRESS, 'name': settings.ZEPTOMAIL_FROM_NAME},
@@ -420,8 +424,13 @@ def send_template_email(subject, template_name, context, recipient, recipient_na
             },
             timeout=10,
         )
+        if not response.ok:
+            logger.error(
+                'ZeptoMail send failed (%s) for template=%s recipient=%s: %s',
+                response.status_code, template_name, recipient, response.text,
+            )
     except Exception:
-        pass
+        logger.exception('ZeptoMail send raised for template=%s recipient=%s', template_name, recipient)
 
 
 def create_notification(user, type_, title, body, detail='', event=None):
@@ -524,6 +533,7 @@ def apply_event_data(event, data, partial=False, acting_user=None):
 
 
 @csrf_exempt
+@ratelimit(key='ip', rate='10/m', method='POST', block=True)
 def register(request):
     error = require_methods(request, ['POST'])
     if error:
@@ -579,6 +589,7 @@ def register(request):
 
 
 @csrf_exempt
+@ratelimit(key='ip', rate='10/m', method='POST', block=True)
 def login(request):
     error = require_methods(request, ['POST'])
     if error:
@@ -674,6 +685,7 @@ def change_password(request):
 
 
 @csrf_exempt
+@ratelimit(key='ip', rate='5/m', method='POST', block=True)
 def password_reset(request):
     error = require_methods(request, ['POST'])
     if error:
@@ -707,6 +719,7 @@ def password_reset(request):
 
 
 @csrf_exempt
+@ratelimit(key='ip', rate='10/m', method='POST', block=True)
 def password_reset_confirm(request):
     error = require_methods(request, ['POST'])
     if error:
@@ -1241,3 +1254,15 @@ def api_not_found(request, exception=None, **_kwargs):
 
 def api_server_error(request):
     return json_error('An unexpected error occurred.', status=500)
+
+
+def api_permission_denied(request, exception=None, **_kwargs):
+    from django_ratelimit.exceptions import Ratelimited
+
+    if isinstance(exception, Ratelimited):
+        return json_error('Too many requests. Please try again later.', status=429)
+    return json_error('You do not have permission to perform this action.', status=403)
+
+
+def health_check(request):
+    return JsonResponse({'status': 'ok'})

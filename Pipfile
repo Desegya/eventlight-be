@@ -12,6 +12,13 @@ pillow = "*"
 python-dotenv = "*"
 django-rest-knox = "*"
 requests = "*"
+dj-database-url = "*"
+psycopg = {extras = ["binary"], version = "*"}
+gunicorn = "*"
+whitenoise = "*"
+django-cloudinary-storage = "*"
+django-ratelimit = "*"
+sentry-sdk = "*"
 
 [dev-packages]
 

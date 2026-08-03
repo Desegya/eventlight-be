@@ -1,8 +1,9 @@
 import json
 
 from django.test import Client, TestCase
+from knox.models import AuthToken
 
-from .models import AuthToken, User
+from .models import User
 
 
 class ApiContractTests(TestCase):
@@ -14,7 +15,7 @@ class ApiContractTests(TestCase):
             password='password123',
             is_staff=True,
         )
-        self.admin_token = AuthToken.create_for_user(self.admin).key
+        _, self.admin_token = AuthToken.objects.create(user=self.admin)
 
     def auth(self, token):
         return {'HTTP_AUTHORIZATION': f'Token {token}'}
