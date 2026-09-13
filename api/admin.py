@@ -3,44 +3,12 @@ from django.contrib.auth.admin import UserAdmin
 from django.utils.html import format_html
 
 from .models import Category, Event, EventLike, EventSave, Notification, RSVP, User
+from .services import notify_event_cancelled, notify_event_status_change
 
 
 admin.site.site_header = 'EventLight Admin'
 admin.site.site_title = 'EventLight Admin'
 admin.site.index_title = 'Operations'
-
-
-def notify_event_status_change(event):
-    if event.approval_status == 'approved':
-        Notification.objects.create(
-            user=event.created_by,
-            type='event_approved',
-            title='Event approved',
-            body=f'{event.title} has been approved.',
-            event=event,
-        )
-    elif event.approval_status == 'rejected':
-        Notification.objects.create(
-            user=event.created_by,
-            type='event_rejected',
-            title='Event rejected',
-            body=f'{event.title} was rejected.',
-            detail=event.rejection_reason,
-            event=event,
-        )
-
-
-def notify_event_cancelled(event):
-    if event.approval_status != 'approved':
-        return
-    for rsvp in event.rsvps.select_related('user'):
-        Notification.objects.create(
-            user=rsvp.user,
-            type='event_cancelled',
-            title='Event cancelled',
-            body=f'{event.title} has been cancelled.',
-            event=event,
-        )
 
 
 class RSVPInline(admin.TabularInline):

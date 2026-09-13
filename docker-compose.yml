@@ -1,0 +1,40 @@
+# Development compose: Django runserver with auto-reload + SQLite (file persisted).
+# Usage:
+#   cp .env.example .env   # then edit values
+#   docker compose up --build
+#
+# Backend -> http://localhost:8000
+# SQLite  -> /app/db.sqlite3 (persisted in the eventlight-sqlite volume)
+
+services:
+  web:
+    build: .
+    container_name: eventlight-web
+    environment:
+      DEBUG: "true"
+      SECRET_KEY: ${SECRET_KEY:-dev-insecure-secret-key-change-me}
+      # No DATABASE_URL -> app falls back to sqlite:///app/db.sqlite3
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      # Optional services (leave blank to disable)
+      CLOUDINARY_URL: ${CLOUDINARY_URL:-}
+      ZEPTOMAIL_API_KEY: ${ZEPTOMAIL_API_KEY:-}
+      ZEPTOMAIL_FROM_ADDRESS: ${ZEPTOMAIL_FROM_ADDRESS:-noreply@dezzi.dev}
+      ZEPTOMAIL_FROM_NAME: ${ZEPTOMAIL_FROM_NAME:-EventLight}
+    volumes:
+      # Mount source for hot-reload during development.
+      - .:/app
+      # Persist the SQLite database across container rebuilds.
+      - eventlight-sqlite:/app/db.sqlite3
+      # Keep container's collected static files from being shadowed by host.
+      - /app/staticfiles
+    ports:
+      - "8000:8000"
+    # Override the prod CMD: use Django's auto-reloading dev server.
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py runserver 0.0.0.0:8000"
+
+volumes:
+  eventlight-sqlite:

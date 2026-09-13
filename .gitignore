@@ -17,6 +17,8 @@ venv/
 env/
 .env
 .env.*
+!.env.example
+!.env.prod.example
 
 # Pipenv
 # Keep Pipfile.lock committed for reproducible installs.

@@ -49,6 +49,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'api.middleware.CookieTokenAuthMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -84,6 +85,13 @@ DATABASES = {
         conn_max_age=600,
     )
 }
+
+# Use a file-based SQLite test database. Django 6.0 converts in-memory SQLite
+# test databases to file:memorydb?mode=memory&cache=shared, which breaks
+# TestCase savepoint rollback between tests.
+if DATABASES['default']['ENGINE'] == 'django.db.backends.sqlite3':
+    import tempfile
+    DATABASES['default']['TEST'] = {'NAME': f'{tempfile.gettempdir()}/test_eventlight.sqlite3'}
 
 
 # Password validation
@@ -123,6 +131,10 @@ USE_TZ = True
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STORAGES = {
+    # Default media storage. Overridden below by Cloudinary when CLOUDINARY_URL is set.
+    'default': {
+        'BACKEND': 'django.core.files.storage.FileSystemStorage',
+    },
     'staticfiles': {
         'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
     },
@@ -132,6 +144,7 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 if CLOUDINARY_URL:
+    # Cloudinary takes precedence over the local filesystem for media uploads.
     STORAGES['default'] = {'BACKEND': 'cloudinary_storage.storage.MediaCloudinaryStorage'}
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
@@ -161,6 +174,13 @@ if not DEBUG:
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
+
+# Security headers applied in all environments.
+X_FRAME_OPTIONS = 'DENY'
+SECURE_REFERRER_POLICY = 'same-origin'
+
+# Cookie-based token auth (see api/middleware.py).
+AUTH_COOKIE_NAME = 'auth_token'
 
 REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',

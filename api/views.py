@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import secrets
@@ -7,13 +8,11 @@ from io import BytesIO
 from datetime import timezone as datetime_timezone
 
 from django.conf import settings
-from django.contrib.auth import authenticate, update_session_auth_hash
+from django.contrib.auth import authenticate
 from django.core.files.base import ContentFile
-import requests as http_requests
-from django.template.loader import render_to_string
 from django.core.paginator import EmptyPage, Paginator
-from django.db import IntegrityError
-from django.db.models import Q
+from django.db import IntegrityError, transaction
+from django.db.models import Count, Exists, OuterRef, Q
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -25,7 +24,15 @@ from PIL import Image, UnidentifiedImageError
 from knox.auth import TokenAuthentication
 from knox.models import AuthToken as KnoxAuthToken
 
+from .middleware import set_auth_cookie, clear_auth_cookie
 from .models import Category, Event, EventLike, EventSave, Notification, PasswordResetToken, RSVP, User
+from .services import (
+    create_notification,
+    notify_event_cancelled,
+    notify_event_status_change,
+    notify_rsvp_confirmed,
+    send_template_email,
+)
 
 logger = logging.getLogger('api')
 
@@ -87,6 +94,10 @@ ALLOWED_IMAGE_TYPES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Response helpers
+# ---------------------------------------------------------------------------
+
 def json_error(detail, status=400):
     return JsonResponse({'detail': detail}, status=status)
 
@@ -112,19 +123,23 @@ def parse_body(request):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Authentication helpers
+# ---------------------------------------------------------------------------
+
 def authenticate_token(request):
     try:
         result = TokenAuthentication().authenticate(request)
-        return result[0] if result else None
+        return result if result else None
     except Exception:
         return None
 
 
 def require_auth(request):
-    user = authenticate_token(request)
-    if not user:
+    result = authenticate_token(request)
+    if not result:
         return None, json_error('Authentication credentials were not provided.', status=401)
-    return user, None
+    return result[0], None
 
 
 def require_admin(request):
@@ -135,6 +150,51 @@ def require_admin(request):
         return None, json_error('You do not have permission to perform this action.', status=403)
     return user, None
 
+
+def get_current_token(request):
+    """Return the Knox AuthToken object for the current request, or None."""
+    result = authenticate_token(request)
+    return result[1] if result else None
+
+
+# ---------------------------------------------------------------------------
+# Queryset annotation helpers (eliminate N+1 queries)
+# ---------------------------------------------------------------------------
+
+def annotate_event_queryset(qs, user=None):
+    """Annotate event counts and user-specific flags to avoid per-row queries."""
+    qs = qs.annotate(
+        _rsvp_count=Count('rsvps', distinct=True),
+        _likes_count=Count('likes', distinct=True),
+        _saves_count=Count('saves', distinct=True),
+    )
+    if user and user.is_authenticated:
+        qs = qs.annotate(
+            _is_liked=Exists(EventLike.objects.filter(user=user, event_id=OuterRef('pk'))),
+            _is_saved=Exists(EventSave.objects.filter(user=user, event_id=OuterRef('pk'))),
+            _is_rsvped=Exists(RSVP.objects.filter(user=user, event_id=OuterRef('pk'))),
+        )
+    return qs
+
+
+def annotate_user_counts(qs):
+    return qs.annotate(
+        _events_created_count=Count('events', distinct=True),
+        _events_liked_count=Count('event_likes', distinct=True),
+        _events_saved_count=Count('event_saves', distinct=True),
+        _events_attending_count=Count('event_rsvps', distinct=True),
+    )
+
+
+def annotate_category_counts(qs):
+    return qs.annotate(
+        _approved_events_count=Count('events', filter=Q(events__approval_status='approved'), distinct=True),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Payload serializers
+# ---------------------------------------------------------------------------
 
 def iso_datetime(value):
     if value is None:
@@ -151,6 +211,12 @@ def compact_user_payload(user):
 
 
 def user_payload(user):
+    def _count(attr, fallback):
+        val = getattr(user, attr, None)
+        if val is None:
+            val = fallback()
+        return val
+
     return {
         'id': user.id,
         'email': user.email,
@@ -169,19 +235,22 @@ def user_payload(user):
         'email_notifications': user.email_notifications,
         'event_reminders': user.event_reminders,
         'date_joined': iso_datetime(user.date_joined),
-        'events_created_count': user.events.count(),
-        'events_liked_count': user.event_likes.count(),
-        'events_saved_count': user.event_saves.count(),
-        'events_attending_count': user.event_rsvps.count(),
+        'events_created_count': _count('_events_created_count', lambda: user.events.count()),
+        'events_liked_count': _count('_events_liked_count', lambda: user.event_likes.count()),
+        'events_saved_count': _count('_events_saved_count', lambda: user.event_saves.count()),
+        'events_attending_count': _count('_events_attending_count', lambda: user.event_rsvps.count()),
     }
 
 
 def public_user_payload(user):
+    approved_count = getattr(user, '_approved_events_count', None)
+    if approved_count is None:
+        approved_count = user.events.filter(approval_status='approved').count()
     return {
         'id': user.id,
         'first_name': user.first_name,
         'last_name': user.last_name,
-        'events_created_count': user.events.filter(approval_status='approved').count(),
+        'events_created_count': approved_count,
         'date_joined': iso_datetime(user.date_joined),
     }
 
@@ -196,10 +265,13 @@ def compact_category_payload(category):
 
 
 def category_payload(category):
+    events_count = getattr(category, '_approved_events_count', None)
+    if events_count is None:
+        events_count = category.events.filter(approval_status='approved').count()
     return {
         **compact_category_payload(category),
         'description': category.description,
-        'events_count': category.events.filter(approval_status='approved').count(),
+        'events_count': events_count,
         'is_active': category.is_active,
         'sort_order': category.sort_order,
     }
@@ -216,13 +288,35 @@ def event_payload(event, request=None, user=None):
         if request:
             image_url = request.build_absolute_uri(image_url)
 
+    def _get(attr, fallback):
+        val = getattr(event, attr, None)
+        if val is None:
+            return fallback()
+        return val
+
+    rsvp_count = _get('_rsvp_count', lambda: event.rsvps.count())
+    likes_count = _get('_likes_count', lambda: event.likes.count())
+    saves_count = _get('_saves_count', lambda: event.saves.count())
+
     is_liked = False
     is_saved = False
     is_rsvped = False
     if user and user.is_authenticated:
-        is_liked = EventLike.objects.filter(user=user, event=event).exists()
-        is_saved = EventSave.objects.filter(user=user, event=event).exists()
-        is_rsvped = RSVP.objects.filter(user=user, event=event).exists()
+        is_liked = getattr(event, '_is_liked', None)
+        is_saved = getattr(event, '_is_saved', None)
+        is_rsvped = getattr(event, '_is_rsvped', None)
+        if is_liked is None:
+            is_liked = EventLike.objects.filter(user=user, event=event).exists()
+        if is_saved is None:
+            is_saved = EventSave.objects.filter(user=user, event=event).exists()
+        if is_rsvped is None:
+            is_rsvped = RSVP.objects.filter(user=user, event=event).exists()
+        is_liked = bool(is_liked)
+        is_saved = bool(is_saved)
+        is_rsvped = bool(is_rsvped)
+
+    capacity = event.capacity
+    is_full = capacity is not None and rsvp_count >= capacity
 
     return {
         'id': event.id,
@@ -239,10 +333,10 @@ def event_payload(event, request=None, user=None):
         'category': compact_category_payload(event.category),
         'language': event.language,
         'age_group': event.age_group,
-        'capacity': event.capacity,
-        'rsvp_count': event.rsvps.count(),
+        'capacity': capacity,
+        'rsvp_count': rsvp_count,
         'is_rsvped': is_rsvped,
-        'is_full': event.is_full,
+        'is_full': is_full,
         'is_featured': event.is_featured,
         'approval_status': event.approval_status,
         'rejection_reason': event.rejection_reason or None,
@@ -250,8 +344,8 @@ def event_payload(event, request=None, user=None):
         'created_by': compact_user_payload(event.created_by),
         'is_liked': is_liked,
         'is_saved': is_saved,
-        'likes_count': event.likes.count(),
-        'saves_count': event.saves.count(),
+        'likes_count': likes_count,
+        'saves_count': saves_count,
         'created_at': iso_datetime(event.created_at),
         'updated_at': iso_datetime(event.updated_at),
     }
@@ -282,6 +376,10 @@ def notification_payload(notification, request=None):
         'created_at': iso_datetime(notification.created_at),
     }
 
+
+# ---------------------------------------------------------------------------
+# Pagination
+# ---------------------------------------------------------------------------
 
 def positive_int(value, default):
     try:
@@ -315,6 +413,10 @@ def paginated_response(request, items, mapper):
         }
     )
 
+
+# ---------------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------------
 
 def password_errors(password):
     if len(password or '') < 8:
@@ -374,6 +476,12 @@ def validate_and_process_image(upload):
     except (UnidentifiedImageError, OSError):
         return None, ['Upload a valid image file.']
 
+    # Strip EXIF metadata by re-creating the image without it.
+    data = list(image.getdata())
+    clean_image = Image.new(image.mode, image.size)
+    clean_image.putdata(data)
+    image = clean_image
+
     if image.width > 1200:
         ratio = 1200 / image.width
         image = image.resize((1200, int(image.height * ratio)), Image.Resampling.LANCZOS)
@@ -386,12 +494,18 @@ def validate_and_process_image(upload):
     return ContentFile(buffer.getvalue(), name=filename), None
 
 
-def get_event(event_id):
-    return Event.objects.select_related('created_by', 'category').filter(id=event_id).first()
+# ---------------------------------------------------------------------------
+# Event retrieval helpers
+# ---------------------------------------------------------------------------
+
+def get_event(event_id, user=None):
+    qs = Event.objects.select_related('created_by', 'category')
+    qs = annotate_event_queryset(qs, user=user)
+    return qs.filter(id=event_id).first()
 
 
 def get_visible_event(event_id, user=None):
-    event = get_event(event_id)
+    event = get_event(event_id, user=user)
     if not event:
         return None
     if event.approval_status == 'approved':
@@ -401,51 +515,15 @@ def get_visible_event(event_id, user=None):
     return None
 
 
-def send_template_email(subject, template_name, context, recipient, recipient_name=''):
-    api_key = settings.ZEPTOMAIL_API_KEY
-    if not api_key:
-        return
-    html = render_to_string(f'api/emails/{template_name}.html', context)
-    text = render_to_string(f'api/emails/{template_name}.txt', context)
-    try:
-        response = http_requests.post(
-            'https://api.zeptomail.com/v1.1/email',
-            json={
-                'from': {'address': settings.ZEPTOMAIL_FROM_ADDRESS, 'name': settings.ZEPTOMAIL_FROM_NAME},
-                'to': [{'email_address': {'address': recipient, 'name': recipient_name or recipient}}],
-                'subject': subject,
-                'htmlbody': html,
-                'textbody': text,
-            },
-            headers={
-                'accept': 'application/json',
-                'content-type': 'application/json',
-                'authorization': api_key,
-            },
-            timeout=10,
-        )
-        if not response.ok:
-            logger.error(
-                'ZeptoMail send failed (%s) for template=%s recipient=%s: %s',
-                response.status_code, template_name, recipient, response.text,
-            )
-    except Exception:
-        logger.exception('ZeptoMail send raised for template=%s recipient=%s', template_name, recipient)
+# ---------------------------------------------------------------------------
+# Event filtering and data application
+# ---------------------------------------------------------------------------
 
-
-def create_notification(user, type_, title, body, detail='', event=None):
-    return Notification.objects.create(
+def filtered_events(query_params, user=None):
+    events = annotate_event_queryset(
+        Event.objects.filter(approval_status='approved').select_related('created_by', 'category'),
         user=user,
-        type=type_,
-        title=title,
-        body=body,
-        detail=detail,
-        event=event,
     )
-
-
-def filtered_events(query_params):
-    events = Event.objects.filter(approval_status='approved').select_related('created_by', 'category')
     search = (query_params.get('search') or '').strip()
     if search:
         events = events.filter(
@@ -529,8 +607,23 @@ def apply_event_data(event, data, partial=False, acting_user=None):
         errors['ticket_price'] = ['This field is required when pricing is paid.']
     if event.pricing == 'free':
         event.ticket_price = None
+    # Reject events scheduled in the past (only when date is being set).
+    if 'date' in data and event.date and event.date < timezone.now():
+        errors.setdefault('date', ['Event date must be in the future.'])
     return errors
 
+
+# ---------------------------------------------------------------------------
+# Password reset token helpers
+# ---------------------------------------------------------------------------
+
+def hash_token(raw_token):
+    return hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Auth views
+# ---------------------------------------------------------------------------
 
 @csrf_exempt
 @ratelimit(key='ip', rate='10/m', method='POST', block=True)
@@ -585,7 +678,9 @@ def register(request):
         recipient=user.email,
     )
 
-    return JsonResponse({'key': token, 'user': user_payload(user)}, status=201)
+    response = JsonResponse({'key': token, 'user': user_payload(user)}, status=201)
+    set_auth_cookie(response, token)
+    return response
 
 
 @csrf_exempt
@@ -606,7 +701,9 @@ def login(request):
         return json_error('Invalid credentials.', status=400)
 
     _, token = KnoxAuthToken.objects.create(user=user)  # type: ignore[misc]
-    return JsonResponse({'key': token, 'user': user_payload(user)})
+    response = JsonResponse({'key': token, 'user': user_payload(user)})
+    set_auth_cookie(response, token)
+    return response
 
 
 @csrf_exempt
@@ -615,17 +712,17 @@ def logout(request):
     if error:
         return error
 
-    _, auth_error = require_auth(request)
-    if auth_error:
-        return auth_error
+    result = authenticate_token(request)
+    if not result:
+        return json_error('Authentication credentials were not provided.', status=401)
 
     try:
-        result = TokenAuthentication().authenticate(request)
-        if result:
-            result[1].delete()
+        result[1].delete()
     except Exception:
         pass
-    return JsonResponse({'detail': 'Logged out successfully.'})
+    response = JsonResponse({'detail': 'Logged out successfully.'})
+    clear_auth_cookie(response)
+    return response
 
 
 @csrf_exempt
@@ -680,7 +777,14 @@ def change_password(request):
 
     user.set_password(data['new_password1'])
     user.save()
-    update_session_auth_hash(request, user)
+
+    # Invalidate all other auth tokens (keep the current session alive).
+    current_token = get_current_token(request)
+    token_qs = KnoxAuthToken.objects.filter(user=user)
+    if current_token:
+        token_qs = token_qs.exclude(pk=current_token.pk)
+    token_qs.delete()
+
     return JsonResponse({'detail': 'Password changed successfully.'})
 
 
@@ -699,12 +803,15 @@ def password_reset(request):
     if not email:
         return validation_response({'email': ['This field is required.']})
 
-    # Always respond the same way — don't leak whether the email exists
+    # Always respond the same way; do not leak whether the email exists.
     user = User.objects.filter(email=email).first()
     if user:
-        token = secrets.token_urlsafe(32)
-        PasswordResetToken.objects.create(user=user, token=token)
-        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}"
+        # Invalidate any previous unused reset tokens for this user.
+        PasswordResetToken.objects.filter(user=user, is_used=False).update(is_used=True)
+
+        raw_token = secrets.token_urlsafe(32)
+        PasswordResetToken.objects.create(user=user, token=hash_token(raw_token))
+        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={raw_token}"
         send_template_email(
             subject='Reset your EventLight password',
             template_name='password_reset',
@@ -751,21 +858,27 @@ def password_reset_confirm(request):
     reset_token = (
         PasswordResetToken.objects
         .select_related('user')
-        .filter(token=token_value, is_used=False)
+        .filter(token=hash_token(token_value), is_used=False)
         .first()
     )
     expiry = timedelta(seconds=settings.PASSWORD_RESET_TIMEOUT_SECONDS)
     if not reset_token or (timezone.now() - reset_token.created_at) > expiry:
         return validation_response({'token': ['This reset link is invalid or has expired.']})
 
-    reset_token.is_used = True
-    reset_token.save(update_fields=['is_used'])
-
-    reset_token.user.set_password(new_password1)
-    reset_token.user.save()
+    with transaction.atomic():
+        reset_token.is_used = True
+        reset_token.save(update_fields=['is_used'])
+        reset_token.user.set_password(new_password1)
+        reset_token.user.save()
+        # Invalidate all auth tokens; force re-login after password reset.
+        KnoxAuthToken.objects.filter(user=reset_token.user).delete()
 
     return JsonResponse({'detail': 'Password reset complete. You can now log in.'})
 
+
+# ---------------------------------------------------------------------------
+# Category views
+# ---------------------------------------------------------------------------
 
 @csrf_exempt
 def categories_collection(request):
@@ -774,8 +887,8 @@ def categories_collection(request):
         return error
 
     if request.method == 'GET':
-        categories = Category.objects.filter(is_active=True)
-        return JsonResponse([category_payload(category) for category in categories], safe=False)
+        categories = annotate_category_counts(Category.objects.filter(is_active=True))
+        return JsonResponse([category_payload(c) for c in categories], safe=False)
 
     _user, auth_error = require_admin(request)
     if auth_error:
@@ -839,20 +952,26 @@ def category_detail(request, category_id):
     return JsonResponse(category_payload(category))
 
 
+# ---------------------------------------------------------------------------
+# Event views
+# ---------------------------------------------------------------------------
+
 @csrf_exempt
 def events_collection(request):
     error = require_methods(request, ['GET', 'POST'])
     if error:
         return error
 
-    user = authenticate_token(request)
-    if request.method == 'GET':
-        events = filtered_events(request.GET)
-        return paginated_response(request, events, lambda event: event_payload(event, request=request, user=user))
+    auth_result = authenticate_token(request)
+    user = auth_result[0] if auth_result else None
 
-    user, auth_error = require_auth(request)
-    if auth_error:
-        return auth_error
+    if request.method == 'GET':
+        events = filtered_events(request.GET, user=user)
+        return paginated_response(request, events, lambda e: event_payload(e, request=request, user=user))
+
+    if not auth_result:
+        return json_error('Authentication credentials were not provided.', status=401)
+    user = auth_result[0]
 
     data = parse_body(request)
     if data is None:
@@ -878,7 +997,8 @@ def event_detail(request, event_id):
     if error:
         return error
 
-    user = authenticate_token(request)
+    auth_result = authenticate_token(request)
+    user = auth_result[0] if auth_result else None
     event = get_visible_event(event_id, user=user)
     if not event:
         return json_error('Not found.', status=404)
@@ -886,26 +1006,14 @@ def event_detail(request, event_id):
     if request.method == 'GET':
         return JsonResponse(event_payload(event, request=request, user=user))
 
-    user, auth_error = require_auth(request)
-    if auth_error:
-        return auth_error
+    if not auth_result:
+        return json_error('Authentication credentials were not provided.', status=401)
+    user = auth_result[0]
     if event.created_by_id != user.id and not user.is_staff:
         return json_error('You do not have permission to modify this event.', status=403)
 
     if request.method == 'DELETE':
-        if event.approval_status == 'approved':
-            event_date = iso_datetime(event.date) or ''
-            browse_url = f'{settings.FRONTEND_URL}/'
-            for rsvp in event.rsvps.select_related('user'):
-                attendee = rsvp.user
-                create_notification(attendee, 'event_cancelled', 'Event cancelled', f'{event.title} has been cancelled.', event=event)
-                if attendee.email_notifications:
-                    send_template_email(
-                        subject=f'Event cancelled — {event.title}',
-                        template_name='event_cancelled',
-                        context={'first_name': attendee.first_name or attendee.email, 'event_title': event.title, 'event_date': event_date, 'event_location': event.location, 'browse_url': browse_url},
-                        recipient=attendee.email,
-                    )
+        notify_event_cancelled(event)
         event.delete()
         return JsonResponse({'detail': 'Event deleted successfully.'})
 
@@ -926,27 +1034,7 @@ def event_detail(request, event_id):
     event.save()
 
     if user.is_staff and old_status != event.approval_status:
-        organizer = event.created_by
-        event_url = f'{settings.FRONTEND_URL}/events/{event.id}'
-        event_date = iso_datetime(event.date) or ''
-        if event.approval_status == 'approved':
-            create_notification(organizer, 'event_approved', 'Event approved', f'{event.title} has been approved.', event=event)
-            if organizer.email_notifications:
-                send_template_email(
-                    subject=f'Your event has been approved — {event.title}',
-                    template_name='event_approved',
-                    context={'first_name': organizer.first_name or organizer.email, 'event_title': event.title, 'event_date': event_date, 'event_url': event_url},
-                    recipient=organizer.email,
-                )
-        elif event.approval_status == 'rejected':
-            create_notification(organizer, 'event_rejected', 'Event rejected', f'{event.title} was rejected.', detail=event.rejection_reason, event=event)
-            if organizer.email_notifications:
-                send_template_email(
-                    subject=f'Update on your event — {event.title}',
-                    template_name='event_rejected',
-                    context={'first_name': organizer.first_name or organizer.email, 'event_title': event.title, 'rejection_reason': event.rejection_reason, 'event_url': event_url},
-                    recipient=organizer.email,
-                )
+        notify_event_status_change(event)
 
     return JsonResponse(event_payload(event, request=request, user=user))
 
@@ -956,21 +1044,23 @@ def related_events(request, event_id):
     if error:
         return error
 
-    user = authenticate_token(request)
+    auth_result = authenticate_token(request)
+    user = auth_result[0] if auth_result else None
     event = get_visible_event(event_id, user=user)
     if not event:
         return json_error('Not found.', status=404)
 
-    events = (
+    events = annotate_event_queryset(
         Event.objects.filter(category=event.category, approval_status='approved')
         .exclude(id=event.id)
         .select_related('created_by', 'category')
-        .order_by('date')[:6]
-    )
+        .order_by('date'),
+        user=user,
+    )[:6]
     return JsonResponse(
         {
             'count': len(events),
-            'results': [event_payload(related, request=request, user=user) for related in events],
+            'results': [event_payload(e, request=request, user=user) for e in events],
         }
     )
 
@@ -1024,44 +1114,49 @@ def toggle_rsvp(request, event_id):
     user, auth_error = require_auth(request)
     if auth_error:
         return auth_error
-    assert user is not None
 
     event = get_visible_event(event_id, user=user)
     if not event:
         return json_error('Not found.', status=404)
 
-    existing = RSVP.objects.filter(user=user, event=event).first()
-    if existing:
-        existing.delete()
-        return JsonResponse(
-            {
-                'rsvped': False,
-                'rsvp_count': event.rsvps.count(),
-                'message': "You're no longer going.",
-            }
+    with transaction.atomic():
+        # Lock the event row to prevent race condition on capacity check.
+        locked_event = (
+            Event.objects.select_for_update()
+            .select_related('created_by', 'category')
+            .get(id=event.id)
         )
+        existing = RSVP.objects.filter(user=user, event=locked_event).first()
+        if existing:
+            existing.delete()
+            rsvp_count = locked_event.rsvps.count()
+            return JsonResponse(
+                {
+                    'rsvped': False,
+                    'rsvp_count': rsvp_count,
+                    'message': "You're no longer going.",
+                }
+            )
 
-    if event.is_full:
-        return json_error('This event is at full capacity.', status=400)
+        if locked_event.capacity is not None:
+            current_count = locked_event.rsvps.count()
+            if current_count >= locked_event.capacity:
+                return json_error('This event is at full capacity.', status=400)
 
-    RSVP.objects.create(user=user, event=event)
-    create_notification(user, 'rsvp_confirmed', "You're going!", f'Your RSVP for {event.title} is confirmed.', event=event)
-    if user.email_notifications:
-        send_template_email(
-            subject=f"You're going to {event.title}!",
-            template_name='rsvp_confirmed',
-            context={'first_name': user.first_name or user.email, 'event_title': event.title, 'event_date': iso_datetime(event.date) or '', 'event_location': event.location, 'event_url': f'{settings.FRONTEND_URL}/events/{event.id}'},
-            recipient=user.email,
-        )
+        RSVP.objects.create(user=user, event=locked_event)
+        rsvp_count = locked_event.rsvps.count()
+
+    notify_rsvp_confirmed(user, locked_event)
     return JsonResponse(
         {
             'rsvped': True,
-            'rsvp_count': event.rsvps.count(),
+            'rsvp_count': rsvp_count,
             'message': "You're going! We'll remind you before the event.",
         }
     )
 
 
+@csrf_exempt
 def event_attendees(request, event_id):
     error = require_methods(request, ['GET'])
     if error:
@@ -1071,7 +1166,7 @@ def event_attendees(request, event_id):
     if auth_error:
         return auth_error
 
-    event = get_event(event_id)
+    event = Event.objects.filter(id=event_id).first()
     if not event:
         return json_error('Not found.', status=404)
     if event.created_by_id != user.id and not user.is_staff:
@@ -1099,9 +1194,11 @@ def liked_events(request):
     if auth_error:
         return auth_error
 
-    events = Event.objects.filter(likes__user=user, approval_status='approved').select_related('created_by', 'category')
-    payload = [event_payload(event, request=request, user=user) for event in events]
-    return JsonResponse(payload, safe=False)
+    events = annotate_event_queryset(
+        Event.objects.filter(likes__user=user, approval_status='approved').select_related('created_by', 'category'),
+        user=user,
+    ).order_by('-created_at')
+    return paginated_response(request, events, lambda e: event_payload(e, request=request, user=user))
 
 
 def saved_events(request):
@@ -1113,9 +1210,11 @@ def saved_events(request):
     if auth_error:
         return auth_error
 
-    events = Event.objects.filter(saves__user=user, approval_status='approved').select_related('created_by', 'category')
-    payload = [event_payload(event, request=request, user=user) for event in events]
-    return JsonResponse(payload, safe=False)
+    events = annotate_event_queryset(
+        Event.objects.filter(saves__user=user, approval_status='approved').select_related('created_by', 'category'),
+        user=user,
+    ).order_by('-created_at')
+    return paginated_response(request, events, lambda e: event_payload(e, request=request, user=user))
 
 
 def my_events(request):
@@ -1127,9 +1226,11 @@ def my_events(request):
     if auth_error:
         return auth_error
 
-    events = Event.objects.filter(created_by=user).select_related('created_by', 'category')
-    payload = [event_payload(event, request=request, user=user) for event in events]
-    return JsonResponse(payload, safe=False)
+    events = annotate_event_queryset(
+        Event.objects.filter(created_by=user).select_related('created_by', 'category'),
+        user=user,
+    ).order_by('-created_at')
+    return paginated_response(request, events, lambda e: event_payload(e, request=request, user=user))
 
 
 def attending_events(request):
@@ -1141,17 +1242,23 @@ def attending_events(request):
     if auth_error:
         return auth_error
 
-    events = Event.objects.filter(rsvps__user=user, approval_status='approved').select_related('created_by', 'category')
-    payload = [event_payload(event, request=request, user=user) for event in events]
-    return JsonResponse(payload, safe=False)
+    events = annotate_event_queryset(
+        Event.objects.filter(rsvps__user=user, approval_status='approved').select_related('created_by', 'category'),
+        user=user,
+    ).order_by('-created_at')
+    return paginated_response(request, events, lambda e: event_payload(e, request=request, user=user))
 
+
+# ---------------------------------------------------------------------------
+# Public user views
+# ---------------------------------------------------------------------------
 
 def public_user(request, user_id):
     error = require_methods(request, ['GET'])
     if error:
         return error
 
-    user = User.objects.filter(id=user_id).first()
+    user = annotate_user_counts(User.objects.filter(id=user_id)).first()
     if not user:
         return json_error('Not found.', status=404)
     return JsonResponse(public_user_payload(user))
@@ -1165,10 +1272,18 @@ def public_user_events(request, user_id):
     owner = User.objects.filter(id=user_id).first()
     if not owner:
         return json_error('Not found.', status=404)
-    user = authenticate_token(request)
-    events = Event.objects.filter(created_by=owner, approval_status='approved').select_related('created_by', 'category')
-    return paginated_response(request, events, lambda event: event_payload(event, request=request, user=user))
+    auth_result = authenticate_token(request)
+    user = auth_result[0] if auth_result else None
+    events = annotate_event_queryset(
+        Event.objects.filter(created_by=owner, approval_status='approved').select_related('created_by', 'category'),
+        user=user,
+    )
+    return paginated_response(request, events, lambda e: event_payload(e, request=request, user=user))
 
+
+# ---------------------------------------------------------------------------
+# Notification views
+# ---------------------------------------------------------------------------
 
 def notifications_collection(request):
     error = require_methods(request, ['GET'])
@@ -1185,7 +1300,7 @@ def notifications_collection(request):
     return paginated_response(
         request,
         notifications,
-        lambda notification: notification_payload(notification, request=request),
+        lambda n: notification_payload(n, request=request),
     )
 
 
@@ -1247,6 +1362,10 @@ def delete_notification(request, notification_id):
         return json_error('Not found.', status=404)
     return HttpResponse(status=204)
 
+
+# ---------------------------------------------------------------------------
+# Error handlers and health check
+# ---------------------------------------------------------------------------
 
 def api_not_found(request, exception=None, **_kwargs):
     return json_error('Not found.', status=404)
