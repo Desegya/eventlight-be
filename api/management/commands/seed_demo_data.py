@@ -1,7 +1,8 @@
 from datetime import timedelta
 from decimal import Decimal
 
-from django.core.management.base import BaseCommand
+from django.conf import settings
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
@@ -300,9 +301,19 @@ class Command(BaseCommand):
             action='store_true',
             help='Delete existing demo events, users, notifications, likes, saves, and RSVPs before seeding.',
         )
+        parser.add_argument(
+            '--allow-production',
+            action='store_true',
+            help='Allow running with DEBUG=false. Demo users share a publicly known password.',
+        )
 
     @transaction.atomic
     def handle(self, *args, **options):
+        if not settings.DEBUG and not options['allow_production']:
+            raise CommandError(
+                'Refusing to seed demo data with DEBUG=false: it creates accounts with a known password. '
+                'Pass --allow-production to override.'
+            )
         if options['clear']:
             self.clear_demo_data()
 

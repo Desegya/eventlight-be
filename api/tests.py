@@ -696,3 +696,20 @@ class OperationalTests(TestCase):
             response = client.get('/api/events/', HTTP_X_REQUEST_ID='trace-me')
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json()['request_id'], 'trace-me')
+
+
+class ProductionGuardTests(TestCase):
+    @override_settings(DEBUG=False, FRONTEND_URL='http://localhost:5173', CLOUDINARY_URL='', ZEPTOMAIL_API_KEY='',
+                       CORS_ALLOWED_ORIGINS=['https://app.example.com'], CSRF_TRUSTED_ORIGINS=[])
+    def test_deploy_checks_flag_broken_production_config(self):
+        from .checks import production_configuration
+
+        ids = {warning.id for warning in production_configuration(None)}
+        self.assertEqual(ids, {'eventlight.W001', 'eventlight.W003', 'eventlight.W004', 'eventlight.W005'})
+
+    @override_settings(DEBUG=False)
+    def test_seed_command_refuses_production(self):
+        from django.core.management import CommandError, call_command
+
+        with self.assertRaises(CommandError):
+            call_command('seed_demo_data')
