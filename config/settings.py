@@ -175,6 +175,22 @@ if not DEBUG:
     SECURE_HSTS_PRELOAD = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
 
+# Number of reverse proxies in front of gunicorn that append to
+# X-Forwarded-For (1 on Railway/Render/Heroku). 0 means trust REMOTE_ADDR.
+NUM_TRUSTED_PROXIES = int(os.environ.get('NUM_TRUSTED_PROXIES', '0' if DEBUG else '1'))
+RATELIMIT_IP_META_KEY = 'api.ratelimit.client_ip'
+
+# Rate-limit counters must be shared by all gunicorn workers, otherwise each
+# worker enforces its own limit. The database cache needs no extra service;
+# its table is created by `manage.py createcachetable` in the release step.
+CACHES = {
+    'default': (
+        {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}
+        if DEBUG else
+        {'BACKEND': 'django.core.cache.backends.db.DatabaseCache', 'LOCATION': 'django_cache'}
+    ),
+}
+
 REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 12,

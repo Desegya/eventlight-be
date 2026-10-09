@@ -2,6 +2,7 @@ import json
 from unittest import mock
 
 from django.conf import settings
+from django.core.cache import cache
 from django.test import Client, TestCase, override_settings
 from knox.models import AuthToken
 
@@ -13,9 +14,16 @@ NO_EMAIL = override_settings(ZEPTOMAIL_API_KEY='')
 TEST_PASSWORD = 'quiet-harbour-lantern-42'
 
 
-@NO_EMAIL
-class ApiContractTests(TestCase):
+class ApiTestCase(TestCase):
     def setUp(self):
+        # Rate-limit counters live in the cache and would leak between tests.
+        cache.clear()
+
+
+@NO_EMAIL
+class ApiContractTests(ApiTestCase):
+    def setUp(self):
+        super().setUp()
         self.client = Client()
         self.admin = User.objects.create_user(
             email='admin@example.com',
@@ -245,12 +253,13 @@ class ApiContractTests(TestCase):
 
 
 @NO_EMAIL
-class CookieAuthCsrfTests(TestCase):
+class CookieAuthCsrfTests(ApiTestCase):
     """Verifies the cookie-based auth + CSRF protection actually does something,
     using a client that enforces CSRF like a real browser would (the default
     test Client silently skips CSRF checks)."""
 
     def setUp(self):
+        super().setUp()
         self.client = Client(enforce_csrf_checks=True)
 
     def register_payload(self, email='cookie@example.com', username='cookieuser'):
@@ -362,8 +371,9 @@ class EmailDeliveryTests(TestCase):
 
 
 @NO_EMAIL
-class PasswordSecurityTests(TestCase):
+class PasswordSecurityTests(ApiTestCase):
     def setUp(self):
+        super().setUp()
         self.client = Client()
         self.user = User.objects.create_user(email='pw@example.com', username='pw', password=TEST_PASSWORD)
 
@@ -422,3 +432,31 @@ class PasswordSecurityTests(TestCase):
         response = self.client.post('/api/auth/logout/')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.cookies[settings.AUTH_COOKIE_NAME].value, '')
+
+
+@NO_EMAIL
+class RateLimitTests(ApiTestCase):
+    def test_client_ip_uses_rightmost_untrusted_forwarded_entry(self):
+        from django.test import RequestFactory
+
+        from .ratelimit import client_ip
+
+        request = RequestFactory().get('/', HTTP_X_FORWARDED_FOR='6.6.6.6, 203.0.113.9', REMOTE_ADDR='10.0.0.1')
+        with self.settings(NUM_TRUSTED_PROXIES=1):
+            # 6.6.6.6 is client-supplied and spoofable; the proxy appended 203.0.113.9.
+            self.assertEqual(client_ip(request), '203.0.113.9')
+        with self.settings(NUM_TRUSTED_PROXIES=0):
+            self.assertEqual(client_ip(request), '10.0.0.1')
+
+    def test_login_is_limited_per_account_across_ips(self):
+        payload = json.dumps({'email': 'victim@example.com', 'password': 'wrong'})
+        statuses = []
+        with self.settings(NUM_TRUSTED_PROXIES=1):
+            for attempt in range(6):
+                response = self.client.post(
+                    '/api/auth/login/', data=payload, content_type='application/json',
+                    HTTP_X_FORWARDED_FOR=f'198.51.100.{attempt}',
+                )
+                statuses.append(response.status_code)
+        self.assertEqual(statuses[:5], [400] * 5)
+        self.assertEqual(statuses[5], 429)

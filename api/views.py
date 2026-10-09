@@ -655,6 +655,7 @@ def register(request):
 
 
 @ratelimit(key='ip', rate='10/m', method='POST', block=True)
+@ratelimit(key='api.ratelimit.email_key', rate='5/m', method='POST', block=True)
 def login(request):
     error = require_methods(request, ['POST'])
     if error:
@@ -748,6 +749,7 @@ def change_password(request):
 
 
 @ratelimit(key='ip', rate='5/m', method='POST', block=True)
+@ratelimit(key='api.ratelimit.email_key', rate='5/h', method='POST', block=True)
 def password_reset(request):
     error = require_methods(request, ['POST'])
     if error:
