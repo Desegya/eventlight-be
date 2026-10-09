@@ -1,12 +1,18 @@
 import json
+from unittest import mock
 
 from django.conf import settings
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from knox.models import AuthToken
 
 from .models import User
 
 
+# The developer's .env may hold a real ZeptoMail key; tests must never send mail.
+NO_EMAIL = override_settings(ZEPTOMAIL_API_KEY='')
+
+
+@NO_EMAIL
 class ApiContractTests(TestCase):
     def setUp(self):
         self.client = Client()
@@ -237,6 +243,7 @@ class ApiContractTests(TestCase):
         self.assertEqual(response.json(), {'detail': 'Not found.'})
 
 
+@NO_EMAIL
 class CookieAuthCsrfTests(TestCase):
     """Verifies the cookie-based auth + CSRF protection actually does something,
     using a client that enforces CSRF like a real browser would (the default
@@ -319,3 +326,35 @@ class CookieAuthCsrfTests(TestCase):
         )
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()['code'], 'csrf_failed')
+
+
+@override_settings(ZEPTOMAIL_API_KEY='test-key', EMAIL_SEND_ASYNC=True)
+class EmailDeliveryTests(TestCase):
+    def send(self):
+        from .views import send_template_email
+        send_template_email('Hi', 'welcome', {'first_name': 'A', 'browse_url': 'x'}, 'alice@example.com')
+
+    @mock.patch('api.views.http_requests.post')
+    def test_email_is_sent_only_after_commit(self, post):
+        post.return_value.ok = True
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            self.send()
+        post.assert_not_called()
+        self.assertEqual(len(callbacks), 1)
+
+    @mock.patch('api.views._email_executor')
+    def test_email_is_delivered_off_the_request_thread(self, executor):
+        with self.captureOnCommitCallbacks(execute=True):
+            self.send()
+        executor.submit.assert_called_once()
+
+    @override_settings(EMAIL_SEND_ASYNC=False)
+    @mock.patch('api.views.http_requests.post')
+    def test_failed_send_logs_masked_recipient(self, post):
+        post.return_value.ok = False
+        post.return_value.status_code = 401
+        post.return_value.text = 'denied'
+        with self.assertLogs('api', level='ERROR') as logs:
+            self.send()
+        self.assertNotIn('alice@example.com', logs.output[0])
+        self.assertIn('a***@example.com', logs.output[0])

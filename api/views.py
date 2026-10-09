@@ -1,6 +1,7 @@
 import json
 import logging
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
@@ -12,7 +13,7 @@ from django.core.files.base import ContentFile
 import requests as http_requests
 from django.template.loader import render_to_string
 from django.core.paginator import EmptyPage, Paginator
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
@@ -81,6 +82,7 @@ EVENT_ORDERING_FIELDS = {'date', 'created_at', 'title'}
 DEFAULT_PAGE_SIZE = 12
 MAX_PAGE_SIZE = 50
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
+ZEPTOMAIL_API_URL = 'https://api.zeptomail.com/v1.1/email'
 ALLOWED_IMAGE_TYPES = {
     'image/jpeg': ('JPEG', '.jpg'),
     'image/png': ('PNG', '.png'),
@@ -422,36 +424,53 @@ def get_visible_event(event_id, user=None):
     return None
 
 
-def send_template_email(subject, template_name, context, recipient, recipient_name=''):
-    api_key = settings.ZEPTOMAIL_API_KEY
-    if not api_key:
-        return
-    html = render_to_string(f'api/emails/{template_name}.html', context)
-    text = render_to_string(f'api/emails/{template_name}.txt', context)
+_email_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='email')
+
+
+def mask_email(address):
+    local, _, domain = (address or '').partition('@')
+    return f'{local[:1]}***@{domain}' if domain else '***'
+
+
+def deliver_email(payload, template_name):
+    recipient = mask_email(payload['to'][0]['email_address']['address'])
     try:
         response = http_requests.post(
-            'https://api.zeptomail.com/v1.1/email',
-            json={
-                'from': {'address': settings.ZEPTOMAIL_FROM_ADDRESS, 'name': settings.ZEPTOMAIL_FROM_NAME},
-                'to': [{'email_address': {'address': recipient, 'name': recipient_name or recipient}}],
-                'subject': subject,
-                'htmlbody': html,
-                'textbody': text,
-            },
+            ZEPTOMAIL_API_URL,
+            json=payload,
             headers={
                 'accept': 'application/json',
                 'content-type': 'application/json',
-                'authorization': api_key,
+                'authorization': settings.ZEPTOMAIL_API_KEY,
             },
             timeout=10,
         )
         if not response.ok:
             logger.error(
                 'ZeptoMail send failed (%s) for template=%s recipient=%s: %s',
-                response.status_code, template_name, recipient, response.text,
+                response.status_code, template_name, recipient, response.text[:500],
             )
     except Exception:
         logger.exception('ZeptoMail send raised for template=%s recipient=%s', template_name, recipient)
+
+
+def send_template_email(subject, template_name, context, recipient, recipient_name=''):
+    if not settings.ZEPTOMAIL_API_KEY:
+        return
+    payload = {
+        'from': {'address': settings.ZEPTOMAIL_FROM_ADDRESS, 'name': settings.ZEPTOMAIL_FROM_NAME},
+        'to': [{'email_address': {'address': recipient, 'name': recipient_name or recipient}}],
+        'subject': subject,
+        'htmlbody': render_to_string(f'api/emails/{template_name}.html', context),
+        'textbody': render_to_string(f'api/emails/{template_name}.txt', context),
+    }
+    if not settings.EMAIL_SEND_ASYNC:
+        deliver_email(payload, template_name)
+        return
+    # Delivery happens off the request thread so a slow mail API cannot push a
+    # request past the gunicorn worker timeout (cancelling an event emails every
+    # attendee), and only after commit so no email describes a rolled-back change.
+    transaction.on_commit(lambda: _email_executor.submit(deliver_email, payload, template_name))
 
 
 def create_notification(user, type_, title, body, detail='', event=None):

@@ -190,6 +190,7 @@ REST_KNOX = {
 ZEPTOMAIL_API_KEY = os.environ.get('ZEPTOMAIL_API_KEY', '')
 ZEPTOMAIL_FROM_ADDRESS = os.environ.get('ZEPTOMAIL_FROM_ADDRESS', 'noreply@dezzi.dev')
 ZEPTOMAIL_FROM_NAME = os.environ.get('ZEPTOMAIL_FROM_NAME', 'EventLight')
+EMAIL_SEND_ASYNC = os.environ.get('EMAIL_SEND_ASYNC', 'true').lower() == 'true'
 
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
 
