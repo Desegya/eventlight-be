@@ -713,3 +713,11 @@ class ProductionGuardTests(TestCase):
 
         with self.assertRaises(CommandError):
             call_command('seed_demo_data')
+
+
+@override_settings(SECURE_SSL_REDIRECT=True, SECURE_REDIRECT_EXEMPT=[r'^api/health/'])
+class SslRedirectTests(TestCase):
+    def test_health_probes_are_not_redirected_but_api_is(self):
+        self.assertEqual(self.client.get('/api/health/').status_code, 200)
+        self.assertEqual(self.client.get('/api/health/ready/').status_code, 200)
+        self.assertEqual(self.client.get('/api/events/').status_code, 301)

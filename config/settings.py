@@ -179,6 +179,8 @@ CSRF_FAILURE_VIEW = 'api.views.csrf_failure'
 if not DEBUG:
     SECURE_SSL_REDIRECT = os.environ.get('SECURE_SSL_REDIRECT', 'true').lower() == 'true'
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    # Platform health probes call the app directly over plain http.
+    SECURE_REDIRECT_EXEMPT = [r'^api/health/']
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_HSTS_SECONDS = int(os.environ.get('SECURE_HSTS_SECONDS', '2592000'))  # 30 days
