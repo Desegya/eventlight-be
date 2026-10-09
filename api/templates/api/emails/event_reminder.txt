@@ -1,0 +1,13 @@
+Hi {{ first_name }},
+
+Just a reminder that "{{ event_title }}" starts within the next day.
+
+Event: {{ event_title }}
+Date: {{ event_date }}
+Location: {{ event_location }}
+
+View event details: {{ event_url }}
+
+You're receiving this because you RSVPed to or saved this event. You can turn off event reminders in your EventLight settings.
+
+— The EventLight Team

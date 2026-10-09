@@ -721,3 +721,42 @@ class SslRedirectTests(TestCase):
         self.assertEqual(self.client.get('/api/health/').status_code, 200)
         self.assertEqual(self.client.get('/api/health/ready/').status_code, 200)
         self.assertEqual(self.client.get('/api/events/').status_code, 301)
+
+
+@NO_EMAIL
+class EventReminderTests(ApiTestCase):
+    def test_reminds_rsvped_and_saving_users_once_respecting_preferences(self):
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        from .models import RSVP, Category, Event, EventSave, Notification
+
+        organizer = User.objects.create_user(email='org@example.com', username='org', password=TEST_PASSWORD)
+        going = User.objects.create_user(email='go@example.com', username='go', password=TEST_PASSWORD)
+        saver = User.objects.create_user(email='sv@example.com', username='sv', password=TEST_PASSWORD)
+        opted_out = User.objects.create_user(email='no@example.com', username='no', password=TEST_PASSWORD,
+                                             event_reminders=False)
+
+        def event(hours_ahead, status='approved'):
+            return Event.objects.create(
+                title='Soon', description='d', date=timezone.now() + timedelta(hours=hours_ahead), location='L',
+                pricing='free', category=Category.objects.get(slug='worship'), language='english',
+                age_group='all_ages', created_by=organizer, approval_status=status,
+            )
+
+        soon, later, pending = event(3), event(72), event(3, status='pending')
+        for target in (soon, later, pending):
+            RSVP.objects.create(user=going, event=target)
+            RSVP.objects.create(user=opted_out, event=target)
+        EventSave.objects.create(user=saver, event=soon)
+
+        call_command('send_event_reminders', stdout=__import__('io').StringIO())
+        call_command('send_event_reminders', stdout=__import__('io').StringIO())
+
+        reminders = Notification.objects.filter(type='reminder')
+        self.assertEqual(
+            sorted(reminders.values_list('user__username', 'event_id')),
+            [('go', soon.id), ('sv', soon.id)],
+        )
