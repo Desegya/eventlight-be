@@ -2,7 +2,7 @@
 
 Backend API for the EventLight frontend.
 
-This README is the frontend integration contract for the current implementation. The development API base URL is:
+Full endpoint reference: [API.md](API.md). Deployment: [Production Deployment](#production-deployment). The development API base URL is:
 
 ```text
 http://localhost:8000/api
@@ -16,21 +16,19 @@ http://localhost:5173
 
 ## Stack
 
-- Python 3.14
-- Django
-- Django REST Framework installed
-- django-filter installed
-- django-cors-headers
-- Pillow
-- SQLite for local development
-- Token auth using `Authorization: Token <token>`
+- Python 3.14, Django 6, gunicorn, WhiteNoise
+- SQLite locally, Postgres in production (`DATABASE_URL`)
+- django-rest-knox tokens delivered as an httpOnly `auth_token` cookie (CSRF-protected); `Authorization: Token <token>` also accepted
+- Pillow image processing, optional Cloudinary media storage
+- ZeptoMail REST API for email, optional Sentry
 
 ## Local Setup
 
-Install dependencies:
+Install dependencies (exact versions from `Pipfile.lock`):
 
 ```bash
-pipenv install
+pipenv sync
+cp .env.example .env   # then set DEBUG=true for local development
 ```
 
 Apply migrations:
@@ -51,10 +49,11 @@ Run the backend:
 pipenv run python manage.py runserver 0.0.0.0:8000
 ```
 
-Run checks and tests:
+Run checks and tests (tests never send email, even with a real key in `.env`):
 
 ```bash
 pipenv run python manage.py check
+pipenv run python manage.py makemigrations --check --dry-run
 pipenv run python manage.py test
 ```
 
@@ -64,7 +63,7 @@ Seed local demo data:
 pipenv run python manage.py seed_demo_data --clear
 ```
 
-This creates demo categories, users, approved/pending/rejected events, RSVPs, likes, saves, and notifications. Demo users use `password123` and emails ending in `@eventlight.test`.
+This creates demo categories, users, approved/pending/rejected events, RSVPs, likes, saves, and notifications. Demo users use `password123` and emails ending in `@eventlight.test`. The command refuses to run with `DEBUG=false` (pass `--allow-production` to override deliberately).
 
 ## Frontend Defaults
 
@@ -156,7 +155,7 @@ Request:
 ```json
 {
   "email": "user@example.com",
-  "password": "password123",
+  "password": "<password>",
   "first_name": "Desmond",
   "last_name": "Egya",
   "username": "desmond_e"
@@ -167,7 +166,6 @@ Response `201`:
 
 ```json
 {
-  "key": "token_string",
   "user": {
     "id": 1,
     "email": "user@example.com",
@@ -205,7 +203,7 @@ Request:
 ```json
 {
   "email": "user@example.com",
-  "password": "password123"
+  "password": "<password>"
 }
 ```
 
@@ -213,7 +211,6 @@ Response `200`:
 
 ```json
 {
-  "key": "token_string",
   "user": { "...": "full user object" }
 }
 ```
@@ -258,9 +255,9 @@ Request:
 
 ```json
 {
-  "old_password": "oldpassword123",
-  "new_password1": "newpassword123",
-  "new_password2": "newpassword123"
+  "old_password": "<current password>",
+  "new_password1": "<new password>",
+  "new_password2": "<new password>"
 }
 ```
 
@@ -883,20 +880,17 @@ Validation errors:
 | `rsvp_confirmed` |
 | `event_cancelled` |
 
-## CORS
+## CORS and CSRF
 
-The backend allows the Vite dev origin:
+Browsers call the API with `credentials: "include"`. Set both lists to the
+deployed frontend origin(s):
 
-```text
-http://localhost:5173
-```
+- `CORS_ALLOWED_ORIGINS`: origins allowed to call the API with credentials.
+- `CSRF_TRUSTED_ORIGINS`: origins allowed to send POST/PATCH/DELETE.
 
-Allowed headers:
-
-```text
-authorization
-content-type
-```
+Allowed request headers: `authorization`, `content-type`, `x-csrftoken`,
+`x-request-id`. Exposed response header: `x-request-id`. See
+[API.md › CSRF](API.md#csrf) for the token flow.
 
 ## Admin Behavior
 
@@ -914,21 +908,53 @@ The Django admin is configured for operations:
 
 ## Frontend Integration Checklist
 
-- Store `key` from login/register as `authToken`.
-- Send authenticated requests with `Authorization: Token <authToken>`.
-- Read categories from `GET /api/categories/`.
-- Use `category.slug` as the event filter value.
-- Read event list data from `response.results`, not the root response.
-- Use `event.category.name` for display and `event.category.slug` for filtering.
-- Use `event.created_by.id`, `event.created_by.first_name`, and `event.created_by.last_name` for creator display.
-- Use `is_liked`, `is_saved`, and `is_rsvped` directly from event responses.
-- Use `rsvp_count` and `is_full` to render RSVP CTA state.
-- Use `GET /api/notifications/unread-count/` for the navbar badge.
-- Use `GET /api/events/my-events/` for organizer dashboards because it includes pending/rejected events.
-- Use `PATCH`, not `PUT`, for event updates.
+- Send every request with `credentials: "include"`; never store tokens in JS.
+- Before POST/PATCH/DELETE, get a token from `GET /api/auth/csrf/` (use the `csrfToken` body field when the API is on another site) and send it as `X-CSRFToken`; on `403` with `"code": "csrf_failed"`, refetch and retry once.
+- Treat `401` from any endpoint as "signed out".
+- Read categories from `GET /api/categories/`; use `category.slug` as the filter value.
+- Read event lists from `response.results`; pass `upcoming=true` for discovery views.
+- Use `is_liked`, `is_saved`, `is_rsvped`, `rsvp_count` and `is_full` from event responses.
+- Use `GET /api/events/my-events/` for organizer dashboards (includes pending/rejected events with `rejection_reason`).
+- Use `PATCH`, not `PUT`, for event updates. Owner edits to approved events send them back to review.
+
+## Production Deployment
+
+The API and the frontend are separate deployments. Before the first launch:
+
+1. **Environment** (see `.env.example`): `DEBUG=false`, a strong `SECRET_KEY`,
+   `ALLOWED_HOSTS`, `DATABASE_URL` (Postgres), `CORS_ALLOWED_ORIGINS` and
+   `CSRF_TRUSTED_ORIGINS` (frontend origin), `FRONTEND_URL`, `CLOUDINARY_URL`,
+   `ZEPTOMAIL_API_KEY`, and `NUM_TRUSTED_PROXIES` (1 behind a single platform
+   proxy such as Railway/Render/Heroku; it decides which `X-Forwarded-For`
+   entry rate limiting trusts).
+2. **Same-site hosting.** Auth uses cookies. If the API is on a different
+   *site* from the frontend (e.g. `*.vercel.app` and `*.up.railway.app`),
+   browsers that block third-party cookies (Safari by default, and any user
+   who enables the setting) will not keep users signed in. Serve both from one
+   registrable domain (`app.example.com` + `api.example.com`) or have the
+   frontend host proxy `/api` to this service.
+3. **Release step** (Procfile `release`, Docker `CMD`): `migrate` and
+   `createcachetable` (the database cache holds rate-limit counters shared by
+   all workers).
+4. **Verify config:** `python manage.py check --deploy` warns (`eventlight.W00x`)
+   about localhost URLs, CORS origins missing from `CSRF_TRUSTED_ORIGINS`,
+   missing Cloudinary or email settings.
+5. **Scheduled job:** run `python manage.py send_event_reminders` hourly
+   (Railway/Render cron) so RSVP/saved-event reminders are delivered.
+6. **Probes:** liveness `GET /api/health/`, readiness `GET /api/health/ready/`.
+7. **Operations:** logs include a request ID (`X-Request-ID`) per line; set
+   `SENTRY_DSN` to capture errors. Take regular Postgres backups (managed
+   provider snapshots or `pg_dump`) and test a restore before launch.
+   Migrations run automatically on release; before a destructive migration,
+   take a backup and plan a rollback.
+
+Rotate `SECRET_KEY` and the ZeptoMail key if they have ever been shared or
+committed. The insecure fallback key in `config/settings.py` is used only when
+`DEBUG=true`.
 
 ## Known Gaps
 
-- Password reset email delivery is not wired to SMTP yet.
-- Scheduled reminder notifications need a background worker before production.
-- `new_event_nearby` notification generation exists as a type but is not automated yet.
+- `new_event_nearby` notifications exist as a type but nothing generates them yet.
+- There is no edit-event page in the frontend; the API supports `PATCH`.
+- Email is sent from an in-process thread pool; emails queued in a worker that
+  is restarted before delivery are lost. Move to a task queue if volume grows.

@@ -1,7 +1,7 @@
 # EventLight API Documentation
 
 **Base URL (dev):** `http://localhost:8000/api`  
-**Auth scheme:** Token — `Authorization: Token <token>`  
+**Auth scheme:** httpOnly `auth_token` cookie set by login/register (browsers); `Authorization: Token <token>` is also accepted (non-browser clients)  
 **Content type:** `application/json` for all requests unless uploading a file (see [Images](#images))
 
 ---
@@ -47,11 +47,47 @@ All timestamps are ISO 8601 UTC strings:
 
 ### Authentication
 
-Protected endpoints require:
+Login and register set an httpOnly `auth_token` cookie; browsers must send
+requests with `credentials: "include"`. The token is never returned in the
+body. Non-browser clients may instead send:
 
 ```http
 Authorization: Token <token>
 ```
+
+Examples below show the header form; the cookie works identically.
+
+### CSRF
+
+Every non-GET request is CSRF-protected (Django's middleware), including
+login and register.
+
+1. `GET /api/auth/csrf/` sets a `csrftoken` cookie **and** returns
+   `{ "detail": "CSRF cookie set.", "csrfToken": "<token>" }`.
+2. Send the token as `X-CSRFToken: <token>` on POST/PATCH/DELETE. When the
+   frontend and API are on different sites the cookie is unreadable from page
+   JavaScript, so use the `csrfToken` from the body.
+3. A failed check returns `403 { "detail": "...", "code": "csrf_failed" }`;
+   fetch a fresh token and retry once.
+
+The request `Origin` must be listed in `CSRF_TRUSTED_ORIGINS`.
+
+### Request IDs
+
+Every response carries an `X-Request-ID` header (a safe incoming value is
+echoed, otherwise one is generated). It appears in server logs and in `500`
+bodies; include it when reporting a problem.
+
+### Rate limits
+
+Exceeding a limit returns `429 { "detail": "Too many requests. Please try again later." }`.
+
+| Endpoint | Limit |
+|---|---|
+| Register | 10/min per IP |
+| Login | 10/min per IP **and** 5/min per email |
+| Password reset request | 5/min per IP **and** 5/hour per email |
+| Password reset confirm | 10/min per IP |
 
 Some endpoints are **auth-aware**: they work without a token but return extra user-specific fields (`is_liked`, `is_saved`, `is_rsvped`) when a valid token is provided.
 
@@ -63,6 +99,12 @@ Some endpoints are **auth-aware**: they work without a token but return extra us
 
 ```json
 { "detail": "Error message here." }
+```
+
+**Server error (`500`):**
+
+```json
+{ "detail": "An unexpected error occurred.", "request_id": "4f1c..." }
 ```
 
 **Validation error:**
@@ -104,7 +146,7 @@ POST /api/auth/register/
 ```json
 {
   "email": "user@example.com",
-  "password": "password123",
+  "password": "<password>",
   "first_name": "Desmond",
   "last_name": "Egya",
   "username": "desmond_e"
@@ -113,17 +155,16 @@ POST /api/auth/register/
 
 | Field | Required | Notes |
 |---|---|---|
-| `email` | Yes | Must be unique |
-| `password` | Yes | Min 8 characters |
+| `email` | Yes | Valid email; must be unique |
+| `password` | Yes | Django password validators: at least 8 characters, not a common password, not entirely numeric, not too similar to the name/email |
 | `first_name` | No | |
 | `last_name` | No | |
 | `username` | No | Defaults to email if omitted |
 
-**Response `201`:**
+**Response `201`** (also sets the `auth_token` cookie):
 
 ```json
 {
-  "key": "9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b",
   "user": {
     "id": 1,
     "email": "user@example.com",
@@ -154,7 +195,7 @@ POST /api/auth/register/
 
 ```json
 { "email": ["A user with this email already exists."] }
-{ "password": ["This password is too short. It must contain at least 8 characters."] }
+{ "password": ["This password is too common."] }
 ```
 
 ---
@@ -170,15 +211,14 @@ POST /api/auth/login/
 ```json
 {
   "email": "user@example.com",
-  "password": "password123"
+  "password": "<password>"
 }
 ```
 
-**Response `200`:**
+**Response `200`** (also sets the `auth_token` cookie):
 
 ```json
 {
-  "key": "9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b",
   "user": { "...": "full user object" }
 }
 ```
@@ -198,7 +238,8 @@ POST /api/auth/logout/
 Authorization: Token <token>
 ```
 
-Invalidates the current token. No request body needed.
+Deletes the current token (if any) and always clears the `auth_token` cookie,
+returning `200` even when the session has already expired. No request body needed.
 
 **Response `200`:**
 
@@ -260,9 +301,9 @@ Authorization: Token <token>
 
 ```json
 {
-  "old_password": "oldpassword123",
-  "new_password1": "newpassword123",
-  "new_password2": "newpassword123"
+  "old_password": "<current password>",
+  "new_password1": "<new password>",
+  "new_password2": "<new password>"
 }
 ```
 
@@ -277,8 +318,11 @@ Authorization: Token <token>
 ```json
 { "old_password": ["Your old password was entered incorrectly."] }
 { "new_password2": ["The two password fields did not match."] }
-{ "new_password1": ["This password is too short. It must contain at least 8 characters."] }
+{ "new_password1": ["This password is too common."] }
 ```
+
+On success every **other** session for the user is signed out; the session
+making the change stays valid.
 
 ---
 
@@ -331,8 +375,8 @@ Extract `token` from the URL query string and POST it with the new password:
 ```json
 {
   "token": "<token from URL query string>",
-  "new_password1": "newpassword123",
-  "new_password2": "newpassword123"
+  "new_password1": "<new password>",
+  "new_password2": "<new password>"
 }
 ```
 
@@ -349,12 +393,15 @@ After success, redirect to login. No auth token is returned.
 ```json
 { "token": ["This reset link is invalid or has expired."] }
 { "new_password2": ["The two password fields did not match."] }
-{ "new_password1": ["This password is too short. It must contain at least 8 characters."] }
+{ "new_password1": ["This password is too common."] }
 ```
 
 Notes:
 
 - A token is single-use. Submitting it twice returns the invalid/expired error.
+- Requesting a new link invalidates any earlier unused link.
+- A successful reset signs the user out of **every** session.
+- Only a SHA-256 hash of the token is stored server-side.
 - Parse the token with `new URLSearchParams(window.location.search).get('token')`.
 
 ---
@@ -546,6 +593,7 @@ Returns approved events only. Supports filtering, searching, and ordering.
 | `language` | `?language=english` | Exact enum value |
 | `age_group` | `?age_group=young_adults` | Exact enum value |
 | `is_featured` | `?is_featured=true` | `true` or `false` |
+| `upcoming` | `?upcoming=true` | Only events that have not finished: start in the future, or `end_date` in the future |
 | `ordering` | `?ordering=-date` | `date`, `created_at`, `title` — prefix `-` for descending |
 | `page` | `?page=2` | Default `1` |
 | `page_size` | `?page_size=24` | Default `12`, max `50` |
@@ -631,7 +679,16 @@ PATCH /api/events/<id>/
 Authorization: Token <token>
 ```
 
-Owner or admin only. Accepts any subset of create fields.
+Owner or admin only. Accepts any subset of create fields, as JSON or
+`multipart/form-data` (to replace the image).
+
+When the **owner** (non-admin) changes any content field or the image of an
+`approved` or `rejected` event, it returns to `pending` and the
+`rejection_reason` is cleared — edits are re-reviewed before going live.
+Owners cannot set `approval_status`, `rejection_reason` or `is_featured`.
+
+Validation covers the enum fields, maximum lengths, `location_lat` in
+[-90, 90], `location_lng` in [-180, 180] and a non-negative `ticket_price`.
 
 **Additional fields for admins only:**
 
@@ -788,6 +845,12 @@ Creating an RSVP also creates an `rsvp_confirmed` notification for the user.
 { "detail": "This event is at full capacity." }
 ```
 
+**`409`** if a concurrent duplicate RSVP was already recorded:
+
+```json
+{ "detail": "You have already RSVPed to this event." }
+```
+
 Status `400`. Use `event.is_full` from the event object to disable the RSVP button before this call.
 
 ---
@@ -924,7 +987,7 @@ Authorization: Token <token>
 | `event_rejected` | Admin rejects an event (detail contains rejection reason) |
 | `rsvp_confirmed` | User RSVPs to an event |
 | `event_cancelled` | An approved event is deleted; sent to all RSVPed users |
-| `reminder` | 24h before a saved or RSVPed event (requires background worker) |
+| `reminder` | Within 24h before a saved or RSVPed event, sent by the scheduled `send_event_reminders` command (users with `event_reminders` on) |
 | `new_event_nearby` | New approved event matches user's preferred categories (requires background worker) |
 
 ---
@@ -1048,11 +1111,13 @@ These are the exact values the API accepts and returns.
 | Status | Meaning |
 |---|---|
 | `400` | Bad request — validation error or invalid JSON |
-| `401` | Missing or invalid token |
-| `403` | Authenticated but not permitted |
+| `401` | Missing, invalid or expired token/cookie |
+| `403` | Not permitted, or CSRF failure (`"code": "csrf_failed"`) |
 | `404` | Resource not found |
 | `405` | Method not allowed |
-| `500` | Unexpected server error |
+| `409` | Conflicting duplicate request (RSVP) |
+| `429` | Rate limit exceeded |
+| `500` | Unexpected server error (body includes `request_id`) |
 
 All error responses are JSON. `404` on any unknown `/api/*` route returns:
 
@@ -1063,5 +1128,16 @@ All error responses are JSON. `404` on any unknown `/api/*` route returns:
 `500` returns:
 
 ```json
-{ "detail": "An unexpected error occurred." }
+{ "detail": "An unexpected error occurred.", "request_id": "4f1c..." }
 ```
+
+---
+
+## Health
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/health/` | Liveness — process is up; touches no dependencies |
+| `GET` | `/api/health/ready/` | Readiness — `200 {"status": "ok", "database": "ok"}` or `503` when the database is unreachable |
+
+Both are exempt from the HTTPS redirect so platform probes can call them over plain http.

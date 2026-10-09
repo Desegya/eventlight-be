@@ -68,8 +68,8 @@ Content-Type: application/json
 ```json
 {
   "token": "<token from URL query string>",
-  "new_password1": "newpassword123",
-  "new_password2": "newpassword123"
+  "new_password1": "<new password>",
+  "new_password2": "<new password>"
 }
 ```
 
@@ -99,7 +99,11 @@ After a successful reset, redirect the user to the login page. No auth token is 
 
 - Token expires after **1 hour**.
 - A token is **single-use** — submitting it a second time returns the invalid/expired error.
-- Minimum password length is **8 characters**.
+- Passwords must pass Django's validators: at least **8 characters**, not a common password, not entirely numeric, not too similar to the user's name/email. Show the server's `new_password1` messages.
+- Requesting a new link invalidates any earlier unused link.
+- A successful reset signs the user out of **every** existing session.
+- Only a SHA-256 hash of the token is stored, so links cannot be recovered from the database.
+- Reset requests are limited to 5/minute per IP and 5/hour per email (`429` beyond that).
 - Always show the same message on the request form regardless of whether the email was found ("Check your email if it's registered").
 - Parse the token with `new URLSearchParams(window.location.search).get('token')` or your router's query param utility.
 - If the confirm request returns a token error, show an "expired or invalid link" message with a prompt to request a new one.
