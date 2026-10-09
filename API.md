@@ -55,7 +55,9 @@ body. Non-browser clients may instead send:
 Authorization: Token <token>
 ```
 
-Examples below show the header form; the cookie works identically.
+Examples below show the header form; the cookie works identically. CSRF
+protection applies to every write regardless of how the client
+authenticates, so header-based clients must also perform the CSRF step below.
 
 ### CSRF
 
