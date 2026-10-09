@@ -942,6 +942,9 @@ The API and the frontend are separate deployments. Before the first launch:
 5. **Scheduled job:** run `python manage.py send_event_reminders` hourly
    (Railway/Render cron) so RSVP/saved-event reminders are delivered.
 6. **Probes:** liveness `GET /api/health/`, readiness `GET /api/health/ready/`.
+   After deploying to staging, run `scripts/e2e_smoke.py` (see its docstring)
+   to exercise the cross-site auth/CSRF flow and the main journeys. It creates
+   data, so never point it at production.
 7. **Operations:** logs include a request ID (`X-Request-ID`) per line; set
    `SENTRY_DSN` to capture errors. Take regular Postgres backups (managed
    provider snapshots or `pg_dump`) and test a restore before launch.
