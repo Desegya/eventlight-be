@@ -293,3 +293,29 @@ class CookieAuthCsrfTests(TestCase):
 
         me_after_logout = self.client.get('/api/auth/user/')
         self.assertEqual(me_after_logout.status_code, 401)
+
+    def test_csrf_endpoint_returns_token_usable_as_header(self):
+        # Cross-site SPAs cannot read the API's cookie, so they rely on the
+        # token in the response body instead.
+        csrf_response = self.client.get('/api/auth/csrf/')
+        body_token = csrf_response.json()['csrfToken']
+        self.assertTrue(body_token)
+
+        register_response = self.client.post(
+            '/api/auth/register/',
+            data=self.register_payload(),
+            content_type='application/json',
+            HTTP_X_CSRFTOKEN=body_token,
+        )
+        self.assertEqual(register_response.status_code, 201)
+
+    def test_csrf_failure_returns_json_with_code(self):
+        self.client.get('/api/auth/csrf/')
+        response = self.client.post(
+            '/api/auth/register/',
+            data=self.register_payload(),
+            content_type='application/json',
+            HTTP_X_CSRFTOKEN='wrong-token-value-wrong-token-value',
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()['code'], 'csrf_failed')

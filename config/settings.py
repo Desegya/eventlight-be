@@ -161,6 +161,7 @@ AUTH_COOKIE_NAME = 'auth_token'
 AUTH_COOKIE_SAMESITE = 'Lax' if DEBUG else 'None'
 AUTH_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SAMESITE = 'Lax' if DEBUG else 'None'
+CSRF_FAILURE_VIEW = 'api.views.csrf_failure'
 
 # Production transport/cookie security. Skipped in DEBUG so local dev over
 # plain http still works.

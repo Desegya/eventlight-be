@@ -18,6 +18,7 @@ from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.utils.text import slugify
+from django.middleware.csrf import get_token
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django_ratelimit.decorators import ratelimit
 from PIL import Image, UnidentifiedImageError
@@ -1283,4 +1284,17 @@ def csrf_token_view(request):
     error = require_methods(request, ['GET'])
     if error:
         return error
-    return JsonResponse({'detail': 'CSRF cookie set.'})
+    # The token is also returned in the body because, when the frontend is
+    # served from a different site than this API, page JavaScript cannot read
+    # the API's csrftoken cookie and so cannot echo it back as X-CSRFToken.
+    return JsonResponse({'detail': 'CSRF cookie set.', 'csrfToken': get_token(request)})
+
+
+def csrf_failure(request, reason=''):
+    # Machine-readable code lets the frontend refetch a token and retry once
+    # instead of surfacing Django's default HTML 403 page.
+    logger.warning('CSRF verification failed for %s %s: %s', request.method, request.path, reason)
+    return JsonResponse(
+        {'detail': 'CSRF verification failed. Refresh the page and try again.', 'code': 'csrf_failed'},
+        status=403,
+    )
