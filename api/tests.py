@@ -760,3 +760,31 @@ class EventReminderTests(ApiTestCase):
             sorted(reminders.values_list('user__username', 'event_id')),
             [('go', soon.id), ('sv', soon.id)],
         )
+
+
+@NO_EMAIL
+class UpcomingFilterTests(ApiTestCase):
+    def test_upcoming_excludes_finished_but_keeps_ongoing_events(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from .models import Category, Event
+
+        owner = User.objects.create_user(email='u@example.com', username='u', password=TEST_PASSWORD)
+        now = timezone.now()
+
+        def event(title, start, end=None):
+            Event.objects.create(
+                title=title, description='d', date=start, end_date=end, location='L', pricing='free',
+                category=Category.objects.get(slug='worship'), language='english', age_group='all_ages',
+                created_by=owner, approval_status='approved',
+            )
+
+        event('past', now - timedelta(days=2))
+        event('ongoing', now - timedelta(hours=1), now + timedelta(hours=1))
+        event('future', now + timedelta(days=2))
+
+        titles = {e['title'] for e in self.client.get('/api/events/?upcoming=true').json()['results']}
+        self.assertEqual(titles, {'ongoing', 'future'})
+        self.assertEqual(self.client.get('/api/events/').json()['count'], 3)

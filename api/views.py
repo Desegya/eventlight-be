@@ -610,6 +610,11 @@ def filtered_events(query_params, user=None):
     if 'is_featured' in query_params:
         events = events.filter(is_featured=parse_bool(query_params.get('is_featured')))
 
+    if parse_bool(query_params.get('upcoming')):
+        # Keep events that are still running, not just ones yet to start.
+        now = timezone.now()
+        events = events.filter(Q(date__gte=now) | Q(end_date__gte=now))
+
     ordering = (query_params.get('ordering') or 'date').strip()
     normalized_ordering = ordering[1:] if ordering.startswith('-') else ordering
     if normalized_ordering not in EVENT_ORDERING_FIELDS:
@@ -762,6 +767,8 @@ def login(request):
     if not user:
         return json_error('Invalid credentials.', status=400)
 
+    # A new token is issued per login, so prune this user's expired ones.
+    KnoxAuthToken.objects.filter(user=user, expiry__lt=timezone.now()).delete()
     _, token = KnoxAuthToken.objects.create(user=user)  # type: ignore[misc]
     response = JsonResponse({'user': user_payload(user)})
     set_auth_cookie(response, token)
