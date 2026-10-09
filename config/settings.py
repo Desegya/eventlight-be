@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from pathlib import Path
 
 import dj_database_url
@@ -77,7 +78,6 @@ AUTH_USER_MODEL = 'api.User'
 
 
 # Database
-# https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
 DATABASES = {
     'default': dj_database_url.config(
@@ -91,7 +91,6 @@ DATABASES = {
 
 
 # Password validation
-# https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -110,7 +109,6 @@ AUTH_PASSWORD_VALIDATORS = [
 
 
 # Internationalization
-# https://docs.djangoproject.com/en/6.0/topics/i18n/
 
 LANGUAGE_CODE = 'en-us'
 
@@ -125,7 +123,6 @@ USE_TZ = True
 
 
 # Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
@@ -171,6 +168,10 @@ CSRF_TRUSTED_ORIGINS = [
 # browsers mandate alongside None) in production. In local dev, frontend and
 # backend both run on `localhost` (different ports only), which browsers treat
 # as same-site, so SameSite=Lax over plain http works there.
+# Browsers that block third-party cookies (Safari by default) drop SameSite=None
+# cookies on cross-site requests entirely, which breaks login. Serve the API
+# from the same site as the frontend (e.g. app.example.com + api.example.com,
+# or a frontend rewrite of /api to this service) to avoid that.
 AUTH_COOKIE_NAME = 'auth_token'
 AUTH_COOKIE_SAMESITE = 'Lax' if DEBUG else 'None'
 AUTH_COOKIE_SECURE = not DEBUG
@@ -212,7 +213,6 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 12,
 }
 
-from datetime import timedelta
 REST_KNOX = {
     'TOKEN_TTL': timedelta(days=30),
     'AUTO_REFRESH': True,

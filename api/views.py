@@ -437,7 +437,7 @@ def parse_decimal(value, field):
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
-        raise ValueError(f'Enter a valid number for {field}.')
+        raise ValueError(f'Enter a valid number for {field}.') from None
 
 
 def parse_nullable_int(value, field):
@@ -446,7 +446,7 @@ def parse_nullable_int(value, field):
     try:
         parsed = int(value)
     except (TypeError, ValueError):
-        raise ValueError(f'Enter a valid integer for {field}.')
+        raise ValueError(f'Enter a valid integer for {field}.') from None
     if parsed < 0:
         raise ValueError(f'{field} cannot be negative.')
     return parsed
