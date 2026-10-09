@@ -33,7 +33,13 @@ jobs:
         run: pipenv run python manage.py check --deploy
 
       - name: Run tests
+        # Production settings otherwise 301 every plain-http test request to https.
+        env:
+          SECURE_SSL_REDIRECT: "false"
         run: pipenv run python manage.py test
+
+      - name: Check for missing migrations
+        run: pipenv run python manage.py makemigrations --check --dry-run
 
   docker-build:
     runs-on: ubuntu-latest
