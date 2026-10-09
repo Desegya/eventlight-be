@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import secrets
@@ -8,7 +9,9 @@ from io import BytesIO
 from datetime import timezone as datetime_timezone
 
 from django.conf import settings
-from django.contrib.auth import authenticate, update_session_auth_hash
+from django.contrib.auth import authenticate
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.base import ContentFile
 import requests as http_requests
 from django.template.loader import render_to_string
@@ -25,6 +28,7 @@ from django_ratelimit.decorators import ratelimit
 from PIL import Image, UnidentifiedImageError
 
 from knox.models import AuthToken as KnoxAuthToken
+from rest_framework.exceptions import AuthenticationFailed
 
 from .authentication import CookieTokenAuthentication
 from .models import Category, Event, EventLike, EventSave, Notification, PasswordResetToken, RSVP, User
@@ -115,12 +119,21 @@ def parse_body(request):
         return None
 
 
-def authenticate_token(request):
+def authenticate_request(request):
+    """Return (user, knox_token) for the request, or (None, None).
+
+    Knox raises AuthenticationFailed for expired/invalid tokens; for this API
+    those are simply unauthenticated requests.
+    """
     try:
         result = CookieTokenAuthentication().authenticate(request)
-        return result[0] if result else None
-    except Exception:
-        return None
+    except AuthenticationFailed:
+        return None, None
+    return result if result else (None, None)
+
+
+def authenticate_token(request):
+    return authenticate_request(request)[0]
 
 
 def set_auth_cookie(response, token):
@@ -339,10 +352,16 @@ def paginated_response(request, items, mapper):
     )
 
 
-def password_errors(password):
-    if len(password or '') < 8:
-        return ['This password is too short. It must contain at least 8 characters.']
+def password_errors(password, user=None):
+    try:
+        validate_password(password, user=user)
+    except DjangoValidationError as exc:
+        return list(exc.messages)
     return []
+
+
+def hash_reset_token(token):
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
 
 
 def parse_event_datetime(value):
@@ -594,7 +613,13 @@ def register(request):
     if not password:
         errors['password'] = ['This field is required.']
     else:
-        password_validation_errors = password_errors(password)
+        candidate = User(
+            email=email,
+            username=username,
+            first_name=data.get('first_name', ''),
+            last_name=data.get('last_name', ''),
+        )
+        password_validation_errors = password_errors(password, user=candidate)
         if password_validation_errors:
             errors['password'] = password_validation_errors
 
@@ -656,16 +681,11 @@ def logout(request):
     if error:
         return error
 
-    _, auth_error = require_auth(request)
-    if auth_error:
-        return auth_error
-
-    try:
-        result = CookieTokenAuthentication().authenticate(request)
-        if result:
-            result[1].delete()
-    except Exception:
-        pass
+    # Always clear the cookie, even when the token has already expired, so the
+    # browser is never left holding a dead credential.
+    _user, token = authenticate_request(request)
+    if token is not None:
+        token.delete()
 
     response = JsonResponse({'detail': 'Logged out successfully.'})
     clear_auth_cookie(response)
@@ -703,9 +723,9 @@ def change_password(request):
     if error:
         return error
 
-    user, auth_error = require_auth(request)
-    if auth_error:
-        return auth_error
+    user, current_token = authenticate_request(request)
+    if not user:
+        return json_error('Authentication credentials were not provided.', status=401)
 
     data = parse_body(request)
     if data is None:
@@ -716,13 +736,14 @@ def change_password(request):
     if data.get('new_password1') != data.get('new_password2'):
         return validation_response({'new_password2': ['The two password fields did not match.']})
 
-    new_password_errors = password_errors(data.get('new_password1') or '')
+    new_password_errors = password_errors(data.get('new_password1') or '', user=user)
     if new_password_errors:
         return validation_response({'new_password1': new_password_errors})
 
     user.set_password(data['new_password1'])
     user.save()
-    update_session_auth_hash(request, user)
+    # Sign out every other device; the session making the change stays valid.
+    KnoxAuthToken.objects.filter(user=user).exclude(digest=current_token.digest).delete()
     return JsonResponse({'detail': 'Password changed successfully.'})
 
 
@@ -744,7 +765,10 @@ def password_reset(request):
     user = User.objects.filter(email=email).first()
     if user:
         token = secrets.token_urlsafe(32)
-        PasswordResetToken.objects.create(user=user, token=token)
+        # Only the newest link stays valid, and only its hash is stored so a
+        # database leak does not hand out working reset links.
+        PasswordResetToken.objects.filter(user=user, is_used=False).update(is_used=True)
+        PasswordResetToken.objects.create(user=user, token=hash_reset_token(token))
         reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}"
         send_template_email(
             subject='Reset your EventLight password',
@@ -784,25 +808,30 @@ def password_reset_confirm(request):
     if new_password1 != new_password2:
         return validation_response({'new_password2': ['The two password fields did not match.']})
 
-    pw_errors = password_errors(new_password1)
-    if pw_errors:
-        return validation_response({'new_password1': pw_errors})
-
+    invalid_token = validation_response({'token': ['This reset link is invalid or has expired.']})
     reset_token = (
         PasswordResetToken.objects
         .select_related('user')
-        .filter(token=token_value, is_used=False)
+        .filter(token=hash_reset_token(token_value), is_used=False)
         .first()
     )
     expiry = timedelta(seconds=settings.PASSWORD_RESET_TIMEOUT_SECONDS)
     if not reset_token or (timezone.now() - reset_token.created_at) > expiry:
-        return validation_response({'token': ['This reset link is invalid or has expired.']})
+        return invalid_token
 
-    reset_token.is_used = True
-    reset_token.save(update_fields=['is_used'])
+    pw_errors = password_errors(new_password1, user=reset_token.user)
+    if pw_errors:
+        return validation_response({'new_password1': pw_errors})
 
-    reset_token.user.set_password(new_password1)
-    reset_token.user.save()
+    with transaction.atomic():
+        # Conditional update makes the token single-use even under concurrent submits.
+        claimed = PasswordResetToken.objects.filter(pk=reset_token.pk, is_used=False).update(is_used=True)
+        if not claimed:
+            return invalid_token
+        reset_token.user.set_password(new_password1)
+        reset_token.user.save()
+        # Whoever prompted the reset may hold a stolen session; end them all.
+        KnoxAuthToken.objects.filter(user=reset_token.user).delete()
 
     return JsonResponse({'detail': 'Password reset complete. You can now log in.'})
 

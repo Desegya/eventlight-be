@@ -5,11 +5,12 @@ from django.conf import settings
 from django.test import Client, TestCase, override_settings
 from knox.models import AuthToken
 
-from .models import User
+from .models import PasswordResetToken, User
 
 
 # The developer's .env may hold a real ZeptoMail key; tests must never send mail.
 NO_EMAIL = override_settings(ZEPTOMAIL_API_KEY='')
+TEST_PASSWORD = 'quiet-harbour-lantern-42'
 
 
 @NO_EMAIL
@@ -19,7 +20,7 @@ class ApiContractTests(TestCase):
         self.admin = User.objects.create_user(
             email='admin@example.com',
             username='admin',
-            password='password123',
+            password=TEST_PASSWORD,
             is_staff=True,
         )
         _, self.admin_token = AuthToken.objects.create(user=self.admin)
@@ -33,7 +34,7 @@ class ApiContractTests(TestCase):
             data=json.dumps(
                 {
                     'email': email,
-                    'password': 'password123',
+                    'password': TEST_PASSWORD,
                     'first_name': 'John',
                     'last_name': 'Doe',
                     'username': username,
@@ -91,7 +92,7 @@ class ApiContractTests(TestCase):
 
         login_response = self.client.post(
             '/api/auth/login/',
-            data=json.dumps({'email': 'user@example.com', 'password': 'password123'}),
+            data=json.dumps({'email': 'user@example.com', 'password': TEST_PASSWORD}),
             content_type='application/json',
         )
         self.assertEqual(login_response.status_code, 200)
@@ -255,7 +256,7 @@ class CookieAuthCsrfTests(TestCase):
     def register_payload(self, email='cookie@example.com', username='cookieuser'):
         return json.dumps({
             'email': email,
-            'password': 'password123',
+            'password': TEST_PASSWORD,
             'first_name': 'Cookie',
             'last_name': 'User',
             'username': username,
@@ -358,3 +359,66 @@ class EmailDeliveryTests(TestCase):
             self.send()
         self.assertNotIn('alice@example.com', logs.output[0])
         self.assertIn('a***@example.com', logs.output[0])
+
+
+@NO_EMAIL
+class PasswordSecurityTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(email='pw@example.com', username='pw', password=TEST_PASSWORD)
+
+    def post(self, path, payload, token=None):
+        extra = {'HTTP_AUTHORIZATION': f'Token {token}'} if token else {}
+        return self.client.post(path, data=json.dumps(payload), content_type='application/json', **extra)
+
+    def request_reset(self, raw_token):
+        with mock.patch('api.views.secrets.token_urlsafe', return_value=raw_token):
+            response = self.post('/api/auth/password/reset/', {'email': 'pw@example.com'})
+        self.assertEqual(response.status_code, 200)
+
+    def confirm_reset(self, raw_token, password='new-quiet-harbour-77'):
+        return self.post('/api/auth/password/reset/confirm/', {
+            'token': raw_token, 'new_password1': password, 'new_password2': password,
+        })
+
+    def test_register_rejects_common_password(self):
+        response = self.post('/api/auth/register/', {'email': 'weak@example.com', 'password': 'password123'})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('password', response.json())
+
+    def test_reset_token_is_stored_hashed(self):
+        self.request_reset('raw-reset-token')
+        self.assertFalse(PasswordResetToken.objects.filter(token='raw-reset-token').exists())
+        self.assertTrue(PasswordResetToken.objects.filter(user=self.user).exists())
+
+    def test_reset_revokes_sessions_and_is_single_use(self):
+        _, session = AuthToken.objects.create(user=self.user)
+        self.request_reset('raw-reset-token')
+
+        self.assertEqual(self.confirm_reset('raw-reset-token').status_code, 200)
+        self.assertEqual(self.client.get('/api/auth/user/', HTTP_AUTHORIZATION=f'Token {session}').status_code, 401)
+        self.assertEqual(self.confirm_reset('raw-reset-token', 'another-quiet-harbour-9').status_code, 400)
+
+    def test_new_reset_link_invalidates_older_one(self):
+        self.request_reset('first-token')
+        self.request_reset('second-token')
+        self.assertEqual(self.confirm_reset('first-token').status_code, 400)
+        self.assertEqual(self.confirm_reset('second-token').status_code, 200)
+
+    def test_change_password_signs_out_other_sessions_only(self):
+        _, current = AuthToken.objects.create(user=self.user)
+        _, other = AuthToken.objects.create(user=self.user)
+        response = self.post('/api/auth/password/change/', {
+            'old_password': TEST_PASSWORD,
+            'new_password1': 'new-quiet-harbour-77',
+            'new_password2': 'new-quiet-harbour-77',
+        }, token=current)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get('/api/auth/user/', HTTP_AUTHORIZATION=f'Token {current}').status_code, 200)
+        self.assertEqual(self.client.get('/api/auth/user/', HTTP_AUTHORIZATION=f'Token {other}').status_code, 401)
+
+    def test_logout_with_dead_token_still_clears_cookie(self):
+        self.client.cookies[settings.AUTH_COOKIE_NAME] = 'expired-or-bogus'
+        response = self.client.post('/api/auth/logout/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.cookies[settings.AUTH_COOKIE_NAME].value, '')
