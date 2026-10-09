@@ -617,3 +617,60 @@ class ProfileValidationTests(ApiTestCase):
             'email': 'not-an-email', 'password': TEST_PASSWORD}), content_type='application/json')
         self.assertEqual(response.status_code, 400)
         self.assertIn('email', response.json())
+
+
+@NO_EMAIL
+class QueryEfficiencyTests(ApiTestCase):
+    def setUp(self):
+        super().setUp()
+        from .models import Category, Event
+
+        self.user = User.objects.create_user(email='q@example.com', username='q', password=TEST_PASSWORD)
+        _, self.token = AuthToken.objects.create(user=self.user)
+        self.category = Category.objects.get(slug='worship')
+        self.make = lambda n: [
+            Event.objects.create(
+                title=f'E{i}', description='d', date='2030-01-01T10:00:00Z', location='L', pricing='free',
+                category=self.category, language='english', age_group='all_ages', created_by=self.user,
+                approval_status='approved',
+            )
+            for i in range(n)
+        ]
+
+    def list_query_count(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as ctx:
+            response = self.client.get('/api/events/', HTTP_AUTHORIZATION=f'Token {self.token}')
+        self.assertEqual(response.status_code, 200)
+        return len(ctx), response.json()
+
+    def test_event_list_query_count_does_not_grow_with_page_size(self):
+        self.make(1)
+        one, _ = self.list_query_count()
+        self.make(9)
+        ten, body = self.list_query_count()
+        self.assertEqual(one, ten)
+        self.assertEqual(body['count'], 10)
+
+    def test_annotated_flags_match_viewer_state(self):
+        event = self.make(1)[0]
+        self.client.post(f'/api/events/{event.id}/like/', HTTP_AUTHORIZATION=f'Token {self.token}')
+        _, body = self.list_query_count()
+        item = body['results'][0]
+        self.assertTrue(item['is_liked'])
+        self.assertFalse(item['is_saved'])
+        self.assertEqual(item['likes_count'], 1)
+        self.assertEqual(item['rsvp_count'], 0)
+
+    def test_rsvp_toggle_respects_capacity(self):
+        event = self.make(1)[0]
+        event.capacity = 1
+        event.save()
+        other = User.objects.create_user(email='o@example.com', username='o', password=TEST_PASSWORD)
+        _, other_token = AuthToken.objects.create(user=other)
+        self.assertEqual(self.client.post(f'/api/events/{event.id}/rsvp/', HTTP_AUTHORIZATION=f'Token {self.token}').json()['rsvped'], True)
+        self.assertEqual(self.client.post(f'/api/events/{event.id}/rsvp/', HTTP_AUTHORIZATION=f'Token {other_token}').status_code, 400)
+        self.assertEqual(self.client.post(f'/api/events/{event.id}/rsvp/', HTTP_AUTHORIZATION=f'Token {self.token}').json()['rsvped'], False)
+        self.assertEqual(self.client.post(f'/api/events/{event.id}/rsvp/', HTTP_AUTHORIZATION=f'Token {other_token}').status_code, 200)

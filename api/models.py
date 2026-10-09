@@ -130,7 +130,8 @@ class Event(models.Model):
 
     @property
     def rsvp_count(self):
-        return self.rsvps.count()
+        annotated = getattr(self, 'rsvp_total', None)
+        return annotated if annotated is not None else self.rsvps.count()
 
     @property
     def is_full(self):

@@ -17,7 +17,8 @@ import requests as http_requests
 from django.template.loader import render_to_string
 from django.core.paginator import EmptyPage, Paginator
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+from django.db.models import Count, Exists, OuterRef, Q, Subquery
+from django.db.models.functions import Coalesce
 from django.http import HttpResponse, JsonResponse
 from django.http.multipartparser import MultiPartParserError
 from django.utils import timezone
@@ -274,7 +275,10 @@ def category_payload(category):
     return {
         **compact_category_payload(category),
         'description': category.description,
-        'events_count': category.events.filter(approval_status='approved').count(),
+        'events_count': (
+            category.approved_events if hasattr(category, 'approved_events')
+            else category.events.filter(approval_status='approved').count()
+        ),
         'is_active': category.is_active,
         'sort_order': category.sort_order,
     }
@@ -295,9 +299,12 @@ def event_payload(event, request=None, user=None):
     is_saved = False
     is_rsvped = False
     if user and user.is_authenticated:
-        is_liked = EventLike.objects.filter(user=user, event=event).exists()
-        is_saved = EventSave.objects.filter(user=user, event=event).exists()
-        is_rsvped = RSVP.objects.filter(user=user, event=event).exists()
+        if hasattr(event, 'viewer_liked'):
+            is_liked, is_saved, is_rsvped = event.viewer_liked, event.viewer_saved, event.viewer_rsvped
+        else:
+            is_liked = EventLike.objects.filter(user=user, event=event).exists()
+            is_saved = EventSave.objects.filter(user=user, event=event).exists()
+            is_rsvped = RSVP.objects.filter(user=user, event=event).exists()
 
     return {
         'id': event.id,
@@ -315,7 +322,7 @@ def event_payload(event, request=None, user=None):
         'language': event.language,
         'age_group': event.age_group,
         'capacity': event.capacity,
-        'rsvp_count': event.rsvps.count(),
+        'rsvp_count': event.rsvp_count,
         'is_rsvped': is_rsvped,
         'is_full': event.is_full,
         'is_featured': event.is_featured,
@@ -325,8 +332,8 @@ def event_payload(event, request=None, user=None):
         'created_by': compact_user_payload(event.created_by),
         'is_liked': is_liked,
         'is_saved': is_saved,
-        'likes_count': event.likes.count(),
-        'saves_count': event.saves.count(),
+        'likes_count': event.likes_total if hasattr(event, 'likes_total') else event.likes.count(),
+        'saves_count': event.saves_total if hasattr(event, 'saves_total') else event.saves.count(),
         'created_at': iso_datetime(event.created_at),
         'updated_at': iso_datetime(event.updated_at),
     }
@@ -472,6 +479,28 @@ def validate_and_process_image(upload):
     return ContentFile(buffer.getvalue(), name=filename), None
 
 
+def count_of(model):
+    counts = model.objects.filter(event=OuterRef('pk')).order_by().values('event').annotate(total=Count('pk')).values('total')
+    return Coalesce(Subquery(counts), 0)
+
+
+def with_event_stats(queryset, user=None):
+    """Annotate counts and the viewer's like/save/RSVP flags so serializing a
+    page of events costs one query instead of ~7 per event."""
+    queryset = queryset.select_related('created_by', 'category').annotate(
+        rsvp_total=count_of(RSVP),
+        likes_total=count_of(EventLike),
+        saves_total=count_of(EventSave),
+    )
+    if user and user.is_authenticated:
+        queryset = queryset.annotate(
+            viewer_liked=Exists(EventLike.objects.filter(event=OuterRef('pk'), user=user)),
+            viewer_saved=Exists(EventSave.objects.filter(event=OuterRef('pk'), user=user)),
+            viewer_rsvped=Exists(RSVP.objects.filter(event=OuterRef('pk'), user=user)),
+        )
+    return queryset
+
+
 def get_event(event_id):
     return Event.objects.select_related('created_by', 'category').filter(id=event_id).first()
 
@@ -547,8 +576,8 @@ def create_notification(user, type_, title, body, detail='', event=None):
     )
 
 
-def filtered_events(query_params):
-    events = Event.objects.filter(approval_status='approved').select_related('created_by', 'category')
+def filtered_events(query_params, user=None):
+    events = with_event_stats(Event.objects.filter(approval_status='approved'), user)
     search = (query_params.get('search') or '').strip()
     if search:
         events = events.filter(
@@ -929,7 +958,9 @@ def categories_collection(request):
         return error
 
     if request.method == 'GET':
-        categories = Category.objects.filter(is_active=True)
+        categories = Category.objects.filter(is_active=True).annotate(
+            approved_events=Count('events', filter=Q(events__approval_status='approved')),
+        )
         return JsonResponse([category_payload(category) for category in categories], safe=False)
 
     _user, auth_error = require_admin(request)
@@ -1001,7 +1032,7 @@ def events_collection(request):
 
     user = authenticate_token(request)
     if request.method == 'GET':
-        events = filtered_events(request.GET)
+        events = filtered_events(request.GET, user)
         return paginated_response(request, events, lambda event: event_payload(event, request=request, user=user))
 
     user, auth_error = require_auth(request)
@@ -1122,9 +1153,8 @@ def related_events(request, event_id):
         return json_error('Not found.', status=404)
 
     events = (
-        Event.objects.filter(category=event.category, approval_status='approved')
+        with_event_stats(Event.objects.filter(category=event.category, approval_status='approved'), user)
         .exclude(id=event.id)
-        .select_related('created_by', 'category')
         .order_by('date')[:6]
     )
     return JsonResponse(
@@ -1147,10 +1177,12 @@ def toggle_like(request, event_id):
     event = get_visible_event(event_id, user=user)
     if not event:
         return json_error('Not found.', status=404)
-    like, created = EventLike.objects.get_or_create(user=user, event=event)
-    if created:
+    if not EventLike.objects.filter(user=user, event=event).delete()[0]:
+        try:
+            EventLike.objects.create(user=user, event=event)
+        except IntegrityError:
+            pass  # a concurrent duplicate request already liked it
         return JsonResponse({'liked': True, 'likes_count': event.likes.count(), 'message': 'Event liked'})
-    like.delete()
     return JsonResponse({'liked': False, 'likes_count': event.likes.count(), 'message': 'Event unliked'})
 
 
@@ -1166,10 +1198,12 @@ def toggle_save(request, event_id):
     event = get_visible_event(event_id, user=user)
     if not event:
         return json_error('Not found.', status=404)
-    save, created = EventSave.objects.get_or_create(user=user, event=event)
-    if created:
+    if not EventSave.objects.filter(user=user, event=event).delete()[0]:
+        try:
+            EventSave.objects.create(user=user, event=event)
+        except IntegrityError:
+            pass  # a concurrent duplicate request already saved it
         return JsonResponse({'saved': True, 'saves_count': event.saves.count(), 'message': 'Event saved'})
-    save.delete()
     return JsonResponse({'saved': False, 'saves_count': event.saves.count(), 'message': 'Event unsaved'})
 
 
@@ -1181,15 +1215,12 @@ def toggle_rsvp(request, event_id):
     user, auth_error = require_auth(request)
     if auth_error:
         return auth_error
-    assert user is not None
 
     event = get_visible_event(event_id, user=user)
     if not event:
         return json_error('Not found.', status=404)
 
-    existing = RSVP.objects.filter(user=user, event=event).first()
-    if existing:
-        existing.delete()
+    if RSVP.objects.filter(user=user, event=event).delete()[0]:
         return JsonResponse(
             {
                 'rsvped': False,
@@ -1198,10 +1229,17 @@ def toggle_rsvp(request, event_id):
             }
         )
 
-    if event.is_full:
-        return json_error('This event is at full capacity.', status=400)
-
-    RSVP.objects.create(user=user, event=event)
+    with transaction.atomic():
+        # Lock the event row so concurrent RSVPs cannot both pass the capacity
+        # check and overbook it (no-op on SQLite, enforced on Postgres).
+        Event.objects.select_for_update().filter(pk=event.pk).first()
+        if event.is_full:
+            return json_error('This event is at full capacity.', status=400)
+        try:
+            with transaction.atomic():
+                RSVP.objects.create(user=user, event=event)
+        except IntegrityError:
+            return json_error('You have already RSVPed to this event.', status=409)
     create_notification(user, 'rsvp_confirmed', "You're going!", f'Your RSVP for {event.title} is confirmed.', event=event)
     if user.email_notifications:
         send_template_email(
@@ -1256,7 +1294,7 @@ def liked_events(request):
     if auth_error:
         return auth_error
 
-    events = Event.objects.filter(likes__user=user, approval_status='approved').select_related('created_by', 'category')
+    events = with_event_stats(Event.objects.filter(likes__user=user, approval_status='approved'), user)
     payload = [event_payload(event, request=request, user=user) for event in events]
     return JsonResponse(payload, safe=False)
 
@@ -1270,7 +1308,7 @@ def saved_events(request):
     if auth_error:
         return auth_error
 
-    events = Event.objects.filter(saves__user=user, approval_status='approved').select_related('created_by', 'category')
+    events = with_event_stats(Event.objects.filter(saves__user=user, approval_status='approved'), user)
     payload = [event_payload(event, request=request, user=user) for event in events]
     return JsonResponse(payload, safe=False)
 
@@ -1284,7 +1322,7 @@ def my_events(request):
     if auth_error:
         return auth_error
 
-    events = Event.objects.filter(created_by=user).select_related('created_by', 'category')
+    events = with_event_stats(Event.objects.filter(created_by=user), user)
     payload = [event_payload(event, request=request, user=user) for event in events]
     return JsonResponse(payload, safe=False)
 
@@ -1298,7 +1336,7 @@ def attending_events(request):
     if auth_error:
         return auth_error
 
-    events = Event.objects.filter(rsvps__user=user, approval_status='approved').select_related('created_by', 'category')
+    events = with_event_stats(Event.objects.filter(rsvps__user=user, approval_status='approved'), user)
     payload = [event_payload(event, request=request, user=user) for event in events]
     return JsonResponse(payload, safe=False)
 
@@ -1323,7 +1361,7 @@ def public_user_events(request, user_id):
     if not owner:
         return json_error('Not found.', status=404)
     user = authenticate_token(request)
-    events = Event.objects.filter(created_by=owner, approval_status='approved').select_related('created_by', 'category')
+    events = with_event_stats(Event.objects.filter(created_by=owner, approval_status='approved'), user)
     return paginated_response(request, events, lambda event: event_payload(event, request=request, user=user))
 
 
