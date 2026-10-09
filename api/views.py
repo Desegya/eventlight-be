@@ -7,6 +7,7 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from datetime import timezone as datetime_timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
 from django.contrib.auth import authenticate
@@ -217,6 +218,16 @@ def iso_datetime(value):
     if value is None:
         return None
     return value.isoformat().replace('+00:00', 'Z')
+
+
+def display_datetime(value):
+    """Human-readable time for emails, in the audience's timezone rather than UTC."""
+    try:
+        zone = ZoneInfo(settings.DISPLAY_TIME_ZONE)
+    except ZoneInfoNotFoundError:  # slim images may ship without tz data
+        zone = datetime_timezone.utc
+    local = timezone.localtime(value, zone)
+    return f"{local.strftime('%A, %d %B %Y at %I:%M %p').replace(' 0', ' ')} {local.tzname()}"
 
 
 def compact_user_payload(user):
@@ -1079,7 +1090,7 @@ def event_detail(request, event_id):
 
     if request.method == 'DELETE':
         if event.approval_status == 'approved':
-            event_date = iso_datetime(event.date) or ''
+            event_date = display_datetime(event.date)
             browse_url = f'{settings.FRONTEND_URL}/'
             for rsvp in event.rsvps.select_related('user'):
                 attendee = rsvp.user
@@ -1120,7 +1131,7 @@ def event_detail(request, event_id):
     if user.is_staff and old_status != event.approval_status:
         organizer = event.created_by
         event_url = f'{settings.FRONTEND_URL}/events/{event.id}'
-        event_date = iso_datetime(event.date) or ''
+        event_date = display_datetime(event.date)
         if event.approval_status == 'approved':
             create_notification(organizer, 'event_approved', 'Event approved', f'{event.title} has been approved.', event=event)
             if organizer.email_notifications:
@@ -1246,7 +1257,7 @@ def toggle_rsvp(request, event_id):
         send_template_email(
             subject=f"You're going to {event.title}!",
             template_name='rsvp_confirmed',
-            context={'first_name': user.first_name or user.email, 'event_title': event.title, 'event_date': iso_datetime(event.date) or '', 'event_location': event.location, 'event_url': f'{settings.FRONTEND_URL}/events/{event.id}'},
+            context={'first_name': user.first_name or user.email, 'event_title': event.title, 'event_date': display_datetime(event.date), 'event_location': event.location, 'event_url': f'{settings.FRONTEND_URL}/events/{event.id}'},
             recipient=user.email,
         )
     return JsonResponse(

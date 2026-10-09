@@ -116,6 +116,9 @@ LANGUAGE_CODE = 'en-us'
 
 TIME_ZONE = 'UTC'
 
+# Timezone used when formatting dates for people (emails); storage stays UTC.
+DISPLAY_TIME_ZONE = os.environ.get('DISPLAY_TIME_ZONE', 'Africa/Lagos')
+
 USE_I18N = True
 
 USE_TZ = True
