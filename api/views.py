@@ -18,13 +18,13 @@ from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.utils.text import slugify
-from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django_ratelimit.decorators import ratelimit
 from PIL import Image, UnidentifiedImageError
 
-from knox.auth import TokenAuthentication
 from knox.models import AuthToken as KnoxAuthToken
 
+from .authentication import CookieTokenAuthentication
 from .models import Category, Event, EventLike, EventSave, Notification, PasswordResetToken, RSVP, User
 
 logger = logging.getLogger('api')
@@ -114,10 +114,30 @@ def parse_body(request):
 
 def authenticate_token(request):
     try:
-        result = TokenAuthentication().authenticate(request)
+        result = CookieTokenAuthentication().authenticate(request)
         return result[0] if result else None
     except Exception:
         return None
+
+
+def set_auth_cookie(response, token):
+    response.set_cookie(
+        settings.AUTH_COOKIE_NAME,
+        token,
+        max_age=int(settings.REST_KNOX['TOKEN_TTL'].total_seconds()),
+        httponly=True,
+        secure=settings.AUTH_COOKIE_SECURE,
+        samesite=settings.AUTH_COOKIE_SAMESITE,
+        path='/',
+    )
+
+
+def clear_auth_cookie(response):
+    response.delete_cookie(
+        settings.AUTH_COOKIE_NAME,
+        path='/',
+        samesite=settings.AUTH_COOKIE_SAMESITE,
+    )
 
 
 def require_auth(request):
@@ -532,7 +552,6 @@ def apply_event_data(event, data, partial=False, acting_user=None):
     return errors
 
 
-@csrf_exempt
 @ratelimit(key='ip', rate='10/m', method='POST', block=True)
 def register(request):
     error = require_methods(request, ['POST'])
@@ -585,10 +604,11 @@ def register(request):
         recipient=user.email,
     )
 
-    return JsonResponse({'key': token, 'user': user_payload(user)}, status=201)
+    response = JsonResponse({'user': user_payload(user)}, status=201)
+    set_auth_cookie(response, token)
+    return response
 
 
-@csrf_exempt
 @ratelimit(key='ip', rate='10/m', method='POST', block=True)
 def login(request):
     error = require_methods(request, ['POST'])
@@ -606,10 +626,11 @@ def login(request):
         return json_error('Invalid credentials.', status=400)
 
     _, token = KnoxAuthToken.objects.create(user=user)  # type: ignore[misc]
-    return JsonResponse({'key': token, 'user': user_payload(user)})
+    response = JsonResponse({'user': user_payload(user)})
+    set_auth_cookie(response, token)
+    return response
 
 
-@csrf_exempt
 def logout(request):
     error = require_methods(request, ['POST'])
     if error:
@@ -620,15 +641,17 @@ def logout(request):
         return auth_error
 
     try:
-        result = TokenAuthentication().authenticate(request)
+        result = CookieTokenAuthentication().authenticate(request)
         if result:
             result[1].delete()
     except Exception:
         pass
-    return JsonResponse({'detail': 'Logged out successfully.'})
+
+    response = JsonResponse({'detail': 'Logged out successfully.'})
+    clear_auth_cookie(response)
+    return response
 
 
-@csrf_exempt
 def current_user(request):
     error = require_methods(request, ['GET', 'PATCH'])
     if error:
@@ -655,7 +678,6 @@ def current_user(request):
     return JsonResponse(user_payload(user))
 
 
-@csrf_exempt
 def change_password(request):
     error = require_methods(request, ['POST'])
     if error:
@@ -684,7 +706,6 @@ def change_password(request):
     return JsonResponse({'detail': 'Password changed successfully.'})
 
 
-@csrf_exempt
 @ratelimit(key='ip', rate='5/m', method='POST', block=True)
 def password_reset(request):
     error = require_methods(request, ['POST'])
@@ -718,7 +739,6 @@ def password_reset(request):
     return JsonResponse({'detail': 'If that email is registered, a reset link has been sent.'})
 
 
-@csrf_exempt
 @ratelimit(key='ip', rate='10/m', method='POST', block=True)
 def password_reset_confirm(request):
     error = require_methods(request, ['POST'])
@@ -767,7 +787,6 @@ def password_reset_confirm(request):
     return JsonResponse({'detail': 'Password reset complete. You can now log in.'})
 
 
-@csrf_exempt
 def categories_collection(request):
     error = require_methods(request, ['GET', 'POST'])
     if error:
@@ -804,7 +823,6 @@ def categories_collection(request):
     return JsonResponse(category_payload(category), status=201)
 
 
-@csrf_exempt
 def category_detail(request, category_id):
     error = require_methods(request, ['PATCH', 'DELETE'])
     if error:
@@ -839,7 +857,6 @@ def category_detail(request, category_id):
     return JsonResponse(category_payload(category))
 
 
-@csrf_exempt
 def events_collection(request):
     error = require_methods(request, ['GET', 'POST'])
     if error:
@@ -872,7 +889,6 @@ def events_collection(request):
     return JsonResponse(event_payload(event, request=request, user=user), status=201)
 
 
-@csrf_exempt
 def event_detail(request, event_id):
     error = require_methods(request, ['GET', 'PATCH', 'DELETE'])
     if error:
@@ -975,7 +991,6 @@ def related_events(request, event_id):
     )
 
 
-@csrf_exempt
 def toggle_like(request, event_id):
     error = require_methods(request, ['POST'])
     if error:
@@ -995,7 +1010,6 @@ def toggle_like(request, event_id):
     return JsonResponse({'liked': False, 'likes_count': event.likes.count(), 'message': 'Event unliked'})
 
 
-@csrf_exempt
 def toggle_save(request, event_id):
     error = require_methods(request, ['POST'])
     if error:
@@ -1015,7 +1029,6 @@ def toggle_save(request, event_id):
     return JsonResponse({'saved': False, 'saves_count': event.saves.count(), 'message': 'Event unsaved'})
 
 
-@csrf_exempt
 def toggle_rsvp(request, event_id):
     error = require_methods(request, ['POST'])
     if error:
@@ -1189,7 +1202,6 @@ def notifications_collection(request):
     )
 
 
-@csrf_exempt
 def mark_notification_read(request, notification_id):
     error = require_methods(request, ['POST'])
     if error:
@@ -1207,7 +1219,6 @@ def mark_notification_read(request, notification_id):
     return JsonResponse(notification_payload(notification, request=request))
 
 
-@csrf_exempt
 def mark_all_notifications_read(request):
     error = require_methods(request, ['POST'])
     if error:
@@ -1232,7 +1243,6 @@ def unread_notifications_count(request):
     return JsonResponse({'count': Notification.objects.filter(user=user, is_read=False).count()})
 
 
-@csrf_exempt
 def delete_notification(request, notification_id):
     error = require_methods(request, ['DELETE'])
     if error:
@@ -1266,3 +1276,11 @@ def api_permission_denied(request, exception=None, **_kwargs):
 
 def health_check(request):
     return JsonResponse({'status': 'ok'})
+
+
+@ensure_csrf_cookie
+def csrf_token_view(request):
+    error = require_methods(request, ['GET'])
+    if error:
+        return error
+    return JsonResponse({'detail': 'CSRF cookie set.'})

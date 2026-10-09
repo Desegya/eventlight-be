@@ -144,11 +144,23 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = [
     'authorization',
     'content-type',
+    'x-csrftoken',
 ]
 
 CSRF_TRUSTED_ORIGINS = [
-    origin for origin in os.environ.get('CSRF_TRUSTED_ORIGINS', '').split(',') if origin
+    origin for origin in os.environ.get('CSRF_TRUSTED_ORIGINS', 'http://localhost:5173').split(',') if origin
 ]
+
+# The frontend is a separate origin from this API (e.g. a Vercel domain vs a
+# Railway/Render domain), so browser cookies set here are cross-site from the
+# frontend's point of view. That requires SameSite=None (+ Secure, which
+# browsers mandate alongside None) in production. In local dev, frontend and
+# backend both run on `localhost` (different ports only), which browsers treat
+# as same-site, so SameSite=Lax over plain http works there.
+AUTH_COOKIE_NAME = 'auth_token'
+AUTH_COOKIE_SAMESITE = 'Lax' if DEBUG else 'None'
+AUTH_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SAMESITE = 'Lax' if DEBUG else 'None'
 
 # Production transport/cookie security. Skipped in DEBUG so local dev over
 # plain http still works.

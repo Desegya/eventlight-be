@@ -1,5 +1,6 @@
 import json
 
+from django.conf import settings
 from django.test import Client, TestCase
 from knox.models import AuthToken
 
@@ -37,7 +38,9 @@ class ApiContractTests(TestCase):
         self.assertEqual(response.status_code, 201)
         body = response.json()
         self.assertIn('user', body)
-        return body['key'], body['user']
+        self.assertNotIn('key', body)
+        token = response.cookies[settings.AUTH_COOKIE_NAME].value
+        return token, body['user']
 
     def create_event(self, token, title='Sunday Worship', category='worship', capacity=None):
         payload = {
@@ -232,3 +235,61 @@ class ApiContractTests(TestCase):
         response = self.client.get('/api/nope/')
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json(), {'detail': 'Not found.'})
+
+
+class CookieAuthCsrfTests(TestCase):
+    """Verifies the cookie-based auth + CSRF protection actually does something,
+    using a client that enforces CSRF like a real browser would (the default
+    test Client silently skips CSRF checks)."""
+
+    def setUp(self):
+        self.client = Client(enforce_csrf_checks=True)
+
+    def register_payload(self, email='cookie@example.com', username='cookieuser'):
+        return json.dumps({
+            'email': email,
+            'password': 'password123',
+            'first_name': 'Cookie',
+            'last_name': 'User',
+            'username': username,
+        })
+
+    def test_register_without_csrf_token_is_rejected(self):
+        response = self.client.post(
+            '/api/auth/register/',
+            data=self.register_payload(),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_register_sets_httponly_cookie_and_csrf_protected_flow_works(self):
+        csrf_response = self.client.get('/api/auth/csrf/')
+        self.assertEqual(csrf_response.status_code, 200)
+        csrf_token = csrf_response.cookies['csrftoken'].value
+
+        register_response = self.client.post(
+            '/api/auth/register/',
+            data=self.register_payload(),
+            content_type='application/json',
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+        self.assertEqual(register_response.status_code, 201)
+        self.assertNotIn('key', register_response.json())
+
+        auth_cookie = register_response.cookies[settings.AUTH_COOKIE_NAME]
+        self.assertTrue(auth_cookie['httponly'])
+
+        # No Authorization header — must be authenticated purely via the cookie
+        # the test client now carries.
+        me_response = self.client.get('/api/auth/user/')
+        self.assertEqual(me_response.status_code, 200)
+        self.assertEqual(me_response.json()['email'], 'cookie@example.com')
+
+        logout_response = self.client.post(
+            '/api/auth/logout/',
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+        self.assertEqual(logout_response.status_code, 200)
+
+        me_after_logout = self.client.get('/api/auth/user/')
+        self.assertEqual(me_after_logout.status_code, 401)
