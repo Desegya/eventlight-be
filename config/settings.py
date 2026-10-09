@@ -42,6 +42,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'api.middleware.RequestIdMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
@@ -82,6 +83,9 @@ DATABASES = {
     'default': dj_database_url.config(
         default=f'sqlite:///{BASE_DIR / "db.sqlite3"}',
         conn_max_age=600,
+        # Reused connections are checked before use, so a database restart or
+        # idle timeout does not fail the next request on each worker.
+        conn_health_checks=True,
     )
 }
 
@@ -150,7 +154,9 @@ CORS_ALLOW_HEADERS = [
     'authorization',
     'content-type',
     'x-csrftoken',
+    'x-request-id',
 ]
+CORS_EXPOSE_HEADERS = ['x-request-id']
 
 CSRF_TRUSTED_ORIGINS = [
     origin for origin in os.environ.get('CSRF_TRUSTED_ORIGINS', 'http://localhost:5173').split(',') if origin
@@ -220,9 +226,17 @@ PASSWORD_RESET_TIMEOUT_SECONDS = int(os.environ.get('PASSWORD_RESET_TIMEOUT_SECO
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    'filters': {
+        'request_id': {'()': 'api.middleware.RequestIdLogFilter'},
+    },
+    'formatters': {
+        'default': {'format': '%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s'},
+    },
     'handlers': {
         'console': {
             'class': 'logging.StreamHandler',
+            'filters': ['request_id'],
+            'formatter': 'default',
         },
     },
     'root': {

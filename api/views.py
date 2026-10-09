@@ -16,7 +16,7 @@ from django.core.files.base import ContentFile
 import requests as http_requests
 from django.template.loader import render_to_string
 from django.core.paginator import EmptyPage, Paginator
-from django.db import IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.db.models import Count, Exists, OuterRef, Q, Subquery
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse, JsonResponse
@@ -33,6 +33,7 @@ from knox.models import AuthToken as KnoxAuthToken
 from rest_framework.exceptions import AuthenticationFailed
 
 from .authentication import CookieTokenAuthentication
+from .middleware import current_request_id
 from .models import Category, Event, EventLike, EventSave, Notification, PasswordResetToken, RSVP, User
 
 logger = logging.getLogger('api')
@@ -1445,7 +1446,10 @@ def api_not_found(request, exception=None, **_kwargs):
 
 
 def api_server_error(request):
-    return json_error('An unexpected error occurred.', status=500)
+    return JsonResponse(
+        {'detail': 'An unexpected error occurred.', 'request_id': current_request_id()},
+        status=500,
+    )
 
 
 def api_permission_denied(request, exception=None, **_kwargs):
@@ -1457,7 +1461,20 @@ def api_permission_denied(request, exception=None, **_kwargs):
 
 
 def health_check(request):
+    """Liveness: the process is up. Deliberately touches no dependencies so a
+    database blip does not get healthy workers restarted."""
     return JsonResponse({'status': 'ok'})
+
+
+def readiness_check(request):
+    """Readiness: the database is reachable and can serve traffic."""
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT 1')
+    except DatabaseError:
+        logger.exception('Readiness check failed: database unavailable')
+        return JsonResponse({'status': 'unavailable', 'database': 'error'}, status=503)
+    return JsonResponse({'status': 'ok', 'database': 'ok'})
 
 
 @ensure_csrf_cookie

@@ -674,3 +674,25 @@ class QueryEfficiencyTests(ApiTestCase):
         self.assertEqual(self.client.post(f'/api/events/{event.id}/rsvp/', HTTP_AUTHORIZATION=f'Token {other_token}').status_code, 400)
         self.assertEqual(self.client.post(f'/api/events/{event.id}/rsvp/', HTTP_AUTHORIZATION=f'Token {self.token}').json()['rsvped'], False)
         self.assertEqual(self.client.post(f'/api/events/{event.id}/rsvp/', HTTP_AUTHORIZATION=f'Token {other_token}').status_code, 200)
+
+
+class OperationalTests(TestCase):
+    def test_responses_carry_request_id_and_honour_safe_incoming_ids(self):
+        generated = self.client.get('/api/health/')
+        self.assertRegex(generated['X-Request-ID'], r'^[0-9a-f]{32}$')
+        echoed = self.client.get('/api/health/', HTTP_X_REQUEST_ID='abc-123')
+        self.assertEqual(echoed['X-Request-ID'], 'abc-123')
+        unsafe = self.client.get('/api/health/', HTTP_X_REQUEST_ID='bad id\ninjected')
+        self.assertNotIn('injected', unsafe['X-Request-ID'])
+
+    def test_readiness_reports_database_state(self):
+        self.assertEqual(self.client.get('/api/health/ready/').json(), {'status': 'ok', 'database': 'ok'})
+        with mock.patch('api.views.connection.cursor', side_effect=__import__('django.db', fromlist=['OperationalError']).OperationalError):
+            self.assertEqual(self.client.get('/api/health/ready/').status_code, 503)
+
+    def test_unhandled_error_returns_json_with_request_id(self):
+        client = Client(raise_request_exception=False)
+        with mock.patch('api.views.filtered_events', side_effect=RuntimeError('boom')):
+            response = client.get('/api/events/', HTTP_X_REQUEST_ID='trace-me')
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()['request_id'], 'trace-me')
