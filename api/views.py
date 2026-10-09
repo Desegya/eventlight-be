@@ -19,13 +19,14 @@ from django.core.paginator import EmptyPage, Paginator
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
+from django.http.multipartparser import MultiPartParserError
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.utils.text import slugify
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django_ratelimit.decorators import ratelimit
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from knox.models import AuthToken as KnoxAuthToken
 from rest_framework.exceptions import AuthenticationFailed
@@ -81,11 +82,23 @@ REQUIRED_EVENT_FIELDS = (
     'age_group',
 )
 
+EVENT_NUMERIC_RANGES = (
+    ('location_lat', -90, 90),
+    ('location_lng', -180, 180),
+    ('ticket_price', 0, 99_999_999),
+)
+# Edits by the organizer to these send an already-moderated event back to review.
+MODERATED_EVENT_FIELDS = set(EVENT_FIELDS) | {'image'}
+
+USER_LIST_FIELDS = ('preferred_categories', 'preferred_languages', 'preferred_age_groups')
+USER_BOOL_FIELDS = ('email_notifications', 'event_reminders')
+
 EVENT_FILTER_FIELDS = ('pricing', 'language', 'age_group')
 EVENT_ORDERING_FIELDS = {'date', 'created_at', 'title'}
 DEFAULT_PAGE_SIZE = 12
 MAX_PAGE_SIZE = 50
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
+MAX_IMAGE_PIXELS = 40_000_000
 ZEPTOMAIL_API_URL = 'https://api.zeptomail.com/v1.1/email'
 ALLOWED_IMAGE_TYPES = {
     'image/jpeg': ('JPEG', '.jpg'),
@@ -108,15 +121,41 @@ def require_methods(request, methods):
     return None
 
 
-def parse_body(request):
+def parse_request(request):
+    """Return (data, files) from a JSON or multipart body; data is None when
+    the body is malformed or not a JSON object."""
     if request.content_type and request.content_type.startswith('multipart/form-data'):
-        return request.POST.dict()
+        if request.method == 'POST':
+            return request.POST.dict(), request.FILES
+        # Django only parses multipart bodies for POST; PATCH needs it explicitly.
+        try:
+            data, files = request.parse_file_upload(request.META, request)
+        except MultiPartParserError:
+            return None, {}
+        return data.dict(), files
     if not request.body:
-        return {}
+        return {}, {}
     try:
-        return json.loads(request.body.decode('utf-8'))
-    except json.JSONDecodeError:
-        return None
+        data = json.loads(request.body.decode('utf-8'))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, {}
+    return (data if isinstance(data, dict) else None), {}
+
+
+def parse_body(request):
+    return parse_request(request)[0]
+
+
+def clean_text(value):
+    return value.strip() if isinstance(value, str) else ''
+
+
+def model_errors(instance, exclude=None):
+    try:
+        instance.full_clean(exclude=exclude, validate_unique=True)
+    except DjangoValidationError as exc:
+        return exc.message_dict
+    return {}
 
 
 def authenticate_request(request):
@@ -413,7 +452,12 @@ def validate_and_process_image(upload):
         image.verify()
         upload.seek(0)
         image = Image.open(upload)
-    except (UnidentifiedImageError, OSError):
+        # Dimensions come from the header, so this rejects decompression bombs
+        # before any pixel data is decoded into memory.
+        if image.width * image.height > MAX_IMAGE_PIXELS:
+            return None, ['Image dimensions are too large.']
+        image = ImageOps.exif_transpose(image)
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
         return None, ['Upload a valid image file.']
 
     if image.width > 1200:
@@ -588,6 +632,15 @@ def apply_event_data(event, data, partial=False, acting_user=None):
         errors['ticket_price'] = ['This field is required when pricing is paid.']
     if event.pricing == 'free':
         event.ticket_price = None
+    for field, low, high in EVENT_NUMERIC_RANGES:
+        value = getattr(event, field)
+        if field not in errors and value is not None and not (low <= value <= high):
+            errors[field] = [f'Ensure this value is between {low} and {high}.']
+
+    # Model validation enforces choices, max lengths and decimal precision,
+    # which would otherwise surface as database errors (HTTP 500) on Postgres.
+    for field, messages in model_errors(event, exclude=['image', 'created_by']).items():
+        errors.setdefault(field, messages)
     return errors
 
 
@@ -601,24 +654,21 @@ def register(request):
     if data is None:
         return json_error('Invalid JSON.', status=400)
 
-    errors = {}
-    email = (data.get('email') or '').strip().lower()
-    password = data.get('password') or ''
-    username = (data.get('username') or email).strip()
+    email = clean_text(data.get('email')).lower()
+    password = data.get('password') if isinstance(data.get('password'), str) else ''
+    candidate = User(
+        email=email,
+        username=clean_text(data.get('username')) or email,
+        first_name=clean_text(data.get('first_name')),
+        last_name=clean_text(data.get('last_name')),
+    )
 
-    if not email:
-        errors['email'] = ['This field is required.']
+    errors = model_errors(candidate, exclude=['password'])
     if User.objects.filter(email=email).exists():
         errors['email'] = ['A user with this email already exists.']
     if not password:
         errors['password'] = ['This field is required.']
     else:
-        candidate = User(
-            email=email,
-            username=username,
-            first_name=data.get('first_name', ''),
-            last_name=data.get('last_name', ''),
-        )
         password_validation_errors = password_errors(password, user=candidate)
         if password_validation_errors:
             errors['password'] = password_validation_errors
@@ -628,11 +678,11 @@ def register(request):
 
     try:
         user = User.objects.create_user(
-            email=email,
-            username=username,
+            email=candidate.email,
+            username=candidate.username,
             password=password,
-            first_name=data.get('first_name', ''),
-            last_name=data.get('last_name', ''),
+            first_name=candidate.first_name,
+            last_name=candidate.last_name,
         )
     except IntegrityError:
         return validation_response({'email': ['A user with this email or username already exists.']})
@@ -709,9 +759,44 @@ def current_user(request):
     if data is None:
         return json_error('Invalid JSON.', status=400)
 
+    errors = {}
+    allowed_list_values = {
+        'preferred_categories': set(Category.objects.values_list('slug', flat=True)),
+        'preferred_languages': {value for value, _label in Event.LANGUAGE_CHOICES},
+        'preferred_age_groups': {value for value, _label in Event.AGE_GROUP_CHOICES},
+    }
     for field in USER_WRITABLE_FIELDS:
-        if field in data:
-            setattr(user, field, data[field])
+        if field not in data:
+            continue
+        value = data[field]
+        if field in USER_LIST_FIELDS:
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                errors[field] = ['Expected a list of strings.']
+                continue
+            unknown = sorted(set(value) - allowed_list_values[field])
+            if unknown:
+                errors[field] = [f'Unknown values: {", ".join(unknown)}.']
+                continue
+            value = list(dict.fromkeys(value))
+        elif field in USER_BOOL_FIELDS:
+            if not isinstance(value, bool):
+                errors[field] = ['Expected true or false.']
+                continue
+        elif field == 'max_distance_km':
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                errors[field] = ['Expected a non-negative whole number or null.']
+                continue
+        else:
+            if not isinstance(value, str):
+                errors[field] = ['Expected a string.']
+                continue
+            value = value.strip()
+        setattr(user, field, value)
+
+    for field, messages in model_errors(user, exclude=['password']).items():
+        errors.setdefault(field, messages)
+    if errors:
+        return validation_response(errors)
     try:
         user.save()
     except IntegrityError:
@@ -902,8 +987,9 @@ def category_detail(request, category_id):
         category.sort_order = positive_int(data.get('sort_order'), 0)
     if 'is_active' in data:
         category.is_active = parse_bool(data.get('is_active'))
-    if 'slug' in data and Category.objects.exclude(id=category.id).filter(slug=category.slug).exists():
-        return validation_response({'slug': ['A category with this slug already exists.']})
+    errors = model_errors(category)
+    if errors:
+        return validation_response(errors)
     category.save()
     return JsonResponse(category_payload(category))
 
@@ -922,14 +1008,14 @@ def events_collection(request):
     if auth_error:
         return auth_error
 
-    data = parse_body(request)
+    data, files = parse_request(request)
     if data is None:
         return json_error('Invalid JSON.', status=400)
 
     event = Event(created_by=user, approval_status='pending')
     errors = apply_event_data(event, data, partial=False, acting_user=user)
-    if request.FILES.get('image'):
-        processed_image, image_errors = validate_and_process_image(request.FILES['image'])
+    if files.get('image'):
+        processed_image, image_errors = validate_and_process_image(files['image'])
         if image_errors:
             errors['image'] = image_errors
         else:
@@ -976,20 +1062,27 @@ def event_detail(request, event_id):
         event.delete()
         return JsonResponse({'detail': 'Event deleted successfully.'})
 
-    data = parse_body(request)
+    data, files = parse_request(request)
     if data is None:
         return json_error('Invalid JSON.', status=400)
 
     old_status = event.approval_status
     errors = apply_event_data(event, data, partial=True, acting_user=user)
-    if request.FILES.get('image'):
-        processed_image, image_errors = validate_and_process_image(request.FILES['image'])
+    if files.get('image'):
+        processed_image, image_errors = validate_and_process_image(files['image'])
         if image_errors:
             errors['image'] = image_errors
         else:
             event.image = processed_image
     if errors:
         return validation_response(errors)
+
+    content_changed = bool(MODERATED_EVENT_FIELDS & (set(data) | set(files)))
+    if not user.is_staff and content_changed and event.approval_status != 'pending':
+        # Otherwise an organizer could get an event approved and then replace
+        # its content without it ever being reviewed again.
+        event.approval_status = 'pending'
+        event.rejection_reason = ''
     event.save()
 
     if user.is_staff and old_status != event.approval_status:

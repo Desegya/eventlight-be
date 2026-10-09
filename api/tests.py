@@ -460,3 +460,160 @@ class RateLimitTests(ApiTestCase):
                 statuses.append(response.status_code)
         self.assertEqual(statuses[:5], [400] * 5)
         self.assertEqual(statuses[5], 429)
+
+
+def make_image_bytes(size=(40, 30), fmt='PNG'):
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new('RGB', size, 'purple').save(buffer, format=fmt)
+    return buffer.getvalue()
+
+
+@NO_EMAIL
+class EventValidationTests(ApiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.owner = User.objects.create_user(email='owner@example.com', username='owner', password=TEST_PASSWORD)
+        self.admin = User.objects.create_user(email='mod@example.com', username='mod', password=TEST_PASSWORD, is_staff=True)
+        _, self.owner_token = AuthToken.objects.create(user=self.owner)
+        _, self.admin_token = AuthToken.objects.create(user=self.admin)
+
+    def auth(self, token):
+        return {'HTTP_AUTHORIZATION': f'Token {token}'}
+
+    def payload(self, **overrides):
+        payload = {
+            'title': 'Choir Night', 'description': 'Songs.', 'date': '2030-06-01T18:00:00Z',
+            'location': 'Lagos', 'pricing': 'free', 'category': 'worship',
+            'language': 'english', 'age_group': 'all_ages',
+        }
+        payload.update(overrides)
+        return payload
+
+    def create(self, **overrides):
+        return self.client.post('/api/events/', data=json.dumps(self.payload(**overrides)),
+                                content_type='application/json', **self.auth(self.owner_token))
+
+    def patch(self, event_id, payload, token):
+        return self.client.patch(f'/api/events/{event_id}/', data=json.dumps(payload),
+                                 content_type='application/json', **self.auth(token))
+
+    def test_rejects_invalid_choices_lengths_and_ranges(self):
+        response = self.create(pricing='banana', language='klingon', title='x' * 300, location_lat=123)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(set(response.json()), {'pricing', 'language', 'title', 'location_lat'})
+
+    def test_rejects_negative_ticket_price(self):
+        response = self.create(pricing='paid', ticket_price=-5)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('ticket_price', response.json())
+
+    def test_non_object_json_body_is_a_400_not_a_500(self):
+        response = self.client.post('/api/events/', data='[1, 2]', content_type='application/json',
+                                    **self.auth(self.owner_token))
+        self.assertEqual(response.status_code, 400)
+
+    def test_multipart_patch_updates_fields_and_image(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from django.test.client import MULTIPART_CONTENT, encode_multipart, BOUNDARY
+
+        event_id = self.create().json()['id']
+        body = encode_multipart(BOUNDARY, {
+            'title': 'Renamed via multipart',
+            'image': SimpleUploadedFile('cover.png', make_image_bytes(), content_type='image/png'),
+        })
+        with self.settings(MEDIA_ROOT=self.media_dir()):
+            response = self.client.patch(f'/api/events/{event_id}/', data=body, content_type=MULTIPART_CONTENT,
+                                         **self.auth(self.owner_token))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['title'], 'Renamed via multipart')
+        self.assertIsNotNone(response.json()['image'])
+
+    def test_rejects_decompression_bomb_dimensions(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        from .views import validate_and_process_image
+
+        with self.settings(MEDIA_ROOT=self.media_dir()), mock.patch('api.views.MAX_IMAGE_PIXELS', 100):
+            upload = SimpleUploadedFile('big.png', make_image_bytes((20, 20)), content_type='image/png')
+            _image, errors = validate_and_process_image(upload)
+        self.assertEqual(errors, ['Image dimensions are too large.'])
+
+    def test_organizer_edit_sends_approved_event_back_to_review(self):
+        event_id = self.create().json()['id']
+        self.assertEqual(self.patch(event_id, {'approval_status': 'approved'}, self.admin_token).status_code, 200)
+
+        response = self.patch(event_id, {'title': 'Something else entirely'}, self.owner_token)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['approval_status'], 'pending')
+        self.assertEqual(self.client.get('/api/events/').json()['count'], 0)
+
+    def test_organizer_cannot_self_approve(self):
+        event_id = self.create().json()['id']
+        response = self.patch(event_id, {'approval_status': 'approved', 'is_featured': True}, self.owner_token)
+        self.assertEqual(response.json()['approval_status'], 'pending')
+        self.assertFalse(response.json()['is_featured'])
+
+    def test_other_user_cannot_modify_event(self):
+        event_id = self.create().json()['id']
+        stranger = User.objects.create_user(email='x@example.com', username='x', password=TEST_PASSWORD)
+        _, stranger_token = AuthToken.objects.create(user=stranger)
+        self.assertEqual(self.patch(event_id, {'approval_status': 'approved'}, self.admin_token).status_code, 200)
+        self.assertEqual(self.patch(event_id, {'title': 'pwned'}, stranger_token).status_code, 403)
+        response = self.client.delete(f'/api/events/{event_id}/', **self.auth(stranger_token))
+        self.assertEqual(response.status_code, 403)
+
+    def test_pending_event_hidden_from_other_users(self):
+        event_id = self.create().json()['id']
+        self.assertEqual(self.client.get(f'/api/events/{event_id}/').status_code, 404)
+        self.assertEqual(self.client.post(f'/api/events/{event_id}/rsvp/', **self.auth(self.admin_token)).status_code, 200)
+
+    def media_dir(self):
+        import tempfile
+
+        path = tempfile.mkdtemp()
+        self.addCleanup(__import__('shutil').rmtree, path, True)
+        return path
+
+
+@NO_EMAIL
+class ProfileValidationTests(ApiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_user(email='me@example.com', username='me', password=TEST_PASSWORD)
+        _, self.token = AuthToken.objects.create(user=self.user)
+
+    def patch(self, payload):
+        return self.client.patch('/api/auth/user/', data=json.dumps(payload), content_type='application/json',
+                                 HTTP_AUTHORIZATION=f'Token {self.token}')
+
+    def test_rejects_wrong_types_without_saving(self):
+        response = self.patch({'max_distance_km': 'abc', 'email_notifications': 'yes', 'first_name': 'Ada'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(set(response.json()), {'max_distance_km', 'email_notifications'})
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, '')
+
+    def test_rejects_unknown_preference_values(self):
+        response = self.patch({'preferred_languages': ['english', 'klingon']})
+        self.assertEqual(response.status_code, 400)
+
+    def test_valid_update_succeeds(self):
+        response = self.patch({'preferred_languages': ['english', 'yoruba'], 'max_distance_km': 25, 'city': ' Ikeja '})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['city'], 'Ikeja')
+
+    def test_cannot_change_email_or_staff_flag(self):
+        self.patch({'email': 'new@example.com', 'is_staff': True})
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, 'me@example.com')
+        self.assertFalse(self.user.is_staff)
+
+    def test_register_rejects_invalid_email(self):
+        response = self.client.post('/api/auth/register/', data=json.dumps({
+            'email': 'not-an-email', 'password': TEST_PASSWORD}), content_type='application/json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('email', response.json())
