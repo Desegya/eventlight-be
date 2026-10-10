@@ -62,8 +62,8 @@ class ApiContractTests(ApiTestCase):
             'title': title,
             'description': 'Join us.',
             'organizer': 'Lagos Christian Center',
-            'date': '2026-06-01T10:00:00Z',
-            'end_date': '2026-06-01T12:00:00Z',
+            'date': '2030-06-01T10:00:00Z',
+            'end_date': '2030-06-01T12:00:00Z',
             'location': 'Faith Tabernacle, Lagos',
             'location_lat': 6.5244,
             'location_lng': 3.3792,
@@ -341,10 +341,10 @@ class CookieAuthCsrfTests(ApiTestCase):
 @override_settings(ZEPTOMAIL_API_KEY='test-key', EMAIL_SEND_ASYNC=True)
 class EmailDeliveryTests(TestCase):
     def send(self):
-        from .views import send_template_email
+        from .services import send_template_email
         send_template_email('Hi', 'welcome', {'first_name': 'A', 'browse_url': 'x'}, 'alice@example.com')
 
-    @mock.patch('api.views.http_requests.post')
+    @mock.patch('api.services.http_requests.post')
     def test_email_is_sent_only_after_commit(self, post):
         post.return_value.ok = True
         with self.captureOnCommitCallbacks(execute=False) as callbacks:
@@ -352,14 +352,14 @@ class EmailDeliveryTests(TestCase):
         post.assert_not_called()
         self.assertEqual(len(callbacks), 1)
 
-    @mock.patch('api.views._email_executor')
+    @mock.patch('api.services._email_executor')
     def test_email_is_delivered_off_the_request_thread(self, executor):
         with self.captureOnCommitCallbacks(execute=True):
             self.send()
         executor.submit.assert_called_once()
 
     @override_settings(EMAIL_SEND_ASYNC=False)
-    @mock.patch('api.views.http_requests.post')
+    @mock.patch('api.services.http_requests.post')
     def test_failed_send_logs_masked_recipient(self, post):
         post.return_value.ok = False
         post.return_value.status_code = 401
@@ -541,6 +541,28 @@ class EventValidationTests(ApiTestCase):
             upload = SimpleUploadedFile('big.png', make_image_bytes((20, 20)), content_type='image/png')
             _image, errors = validate_and_process_image(upload)
         self.assertEqual(errors, ['Image dimensions are too large.'])
+
+    def test_uploaded_images_lose_exif_but_keep_orientation(self):
+        from io import BytesIO
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from PIL import Image
+
+        from .views import validate_and_process_image
+
+        exif = Image.Exif()
+        exif[0x0112] = 6  # rotate 90 degrees
+        exif[0x8825] = {1: 'N', 2: (6.0, 31.0, 0.0)}  # GPS location: must not be published
+        source = BytesIO()
+        Image.new('RGB', (64, 48), 'red').save(source, 'JPEG', exif=exif.tobytes())
+
+        processed, errors = validate_and_process_image(
+            SimpleUploadedFile('photo.jpg', source.getvalue(), content_type='image/jpeg')
+        )
+        self.assertIsNone(errors)
+        result = Image.open(BytesIO(processed.read()))
+        self.assertEqual(len(result.getexif()), 0)
+        self.assertEqual(result.size, (48, 64))
 
     def test_organizer_edit_sends_approved_event_back_to_review(self):
         event_id = self.create().json()['id']

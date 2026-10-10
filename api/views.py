@@ -2,20 +2,16 @@ import hashlib
 import json
 import logging
 import secrets
-from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from datetime import timezone as datetime_timezone
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.base import ContentFile
-import requests as http_requests
-from django.template.loader import render_to_string
 from django.core.paginator import EmptyPage, Paginator
 from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.db.models import Count, Exists, OuterRef, Q, Subquery
@@ -36,6 +32,12 @@ from rest_framework.exceptions import AuthenticationFailed
 from .authentication import CookieTokenAuthentication
 from .middleware import current_request_id
 from .models import Category, Event, EventLike, EventSave, Notification, PasswordResetToken, RSVP, User
+from .services import (
+    notify_event_cancelled,
+    notify_event_status_change,
+    notify_rsvp_confirmed,
+    send_template_email,
+)
 
 logger = logging.getLogger('api')
 
@@ -102,7 +104,6 @@ DEFAULT_PAGE_SIZE = 12
 MAX_PAGE_SIZE = 50
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
-ZEPTOMAIL_API_URL = 'https://api.zeptomail.com/v1.1/email'
 ALLOWED_IMAGE_TYPES = {
     'image/jpeg': ('JPEG', '.jpg'),
     'image/png': ('PNG', '.png'),
@@ -218,16 +219,6 @@ def iso_datetime(value):
     if value is None:
         return None
     return value.isoformat().replace('+00:00', 'Z')
-
-
-def display_datetime(value):
-    """Human-readable time for emails, in the audience's timezone rather than UTC."""
-    try:
-        zone = ZoneInfo(settings.DISPLAY_TIME_ZONE)
-    except ZoneInfoNotFoundError:  # slim images may ship without tz data
-        zone = datetime_timezone.utc
-    local = timezone.localtime(value, zone)
-    return f"{local.strftime('%A, %d %B %Y at %I:%M %p').replace(' 0', ' ')} {local.tzname()}"
 
 
 def compact_user_payload(user):
@@ -528,66 +519,6 @@ def get_visible_event(event_id, user=None):
     return None
 
 
-_email_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='email')
-
-
-def mask_email(address):
-    local, _, domain = (address or '').partition('@')
-    return f'{local[:1]}***@{domain}' if domain else '***'
-
-
-def deliver_email(payload, template_name):
-    recipient = mask_email(payload['to'][0]['email_address']['address'])
-    try:
-        response = http_requests.post(
-            ZEPTOMAIL_API_URL,
-            json=payload,
-            headers={
-                'accept': 'application/json',
-                'content-type': 'application/json',
-                'authorization': settings.ZEPTOMAIL_API_KEY,
-            },
-            timeout=10,
-        )
-        if not response.ok:
-            logger.error(
-                'ZeptoMail send failed (%s) for template=%s recipient=%s: %s',
-                response.status_code, template_name, recipient, response.text[:500],
-            )
-    except Exception:
-        logger.exception('ZeptoMail send raised for template=%s recipient=%s', template_name, recipient)
-
-
-def send_template_email(subject, template_name, context, recipient, recipient_name=''):
-    if not settings.ZEPTOMAIL_API_KEY:
-        return
-    payload = {
-        'from': {'address': settings.ZEPTOMAIL_FROM_ADDRESS, 'name': settings.ZEPTOMAIL_FROM_NAME},
-        'to': [{'email_address': {'address': recipient, 'name': recipient_name or recipient}}],
-        'subject': subject,
-        'htmlbody': render_to_string(f'api/emails/{template_name}.html', context),
-        'textbody': render_to_string(f'api/emails/{template_name}.txt', context),
-    }
-    if not settings.EMAIL_SEND_ASYNC:
-        deliver_email(payload, template_name)
-        return
-    # Delivery happens off the request thread so a slow mail API cannot push a
-    # request past the gunicorn worker timeout (cancelling an event emails every
-    # attendee), and only after commit so no email describes a rolled-back change.
-    transaction.on_commit(lambda: _email_executor.submit(deliver_email, payload, template_name))
-
-
-def create_notification(user, type_, title, body, detail='', event=None):
-    return Notification.objects.create(
-        user=user,
-        type=type_,
-        title=title,
-        body=body,
-        detail=detail,
-        event=event,
-    )
-
-
 def filtered_events(query_params, user=None):
     events = with_event_stats(Event.objects.filter(approval_status='approved'), user)
     search = (query_params.get('search') or '').strip()
@@ -674,6 +605,9 @@ def apply_event_data(event, data, partial=False, acting_user=None):
 
     if event.end_date and event.date and event.end_date <= event.date:
         errors['end_date'] = ['End date must be after start date.']
+    # Only when the date is being set, so unrelated edits to a past event still work.
+    if 'date' in data and event.date and 'date' not in errors and event.date < timezone.now():
+        errors['date'] = ['Event date must be in the future.']
     if event.pricing == 'paid' and event.ticket_price is None:
         errors['ticket_price'] = ['This field is required when pricing is paid.']
     if event.pricing == 'free':
@@ -1096,19 +1030,7 @@ def event_detail(request, event_id):
         return json_error('You do not have permission to modify this event.', status=403)
 
     if request.method == 'DELETE':
-        if event.approval_status == 'approved':
-            event_date = display_datetime(event.date)
-            browse_url = f'{settings.FRONTEND_URL}/'
-            for rsvp in event.rsvps.select_related('user'):
-                attendee = rsvp.user
-                create_notification(attendee, 'event_cancelled', 'Event cancelled', f'{event.title} has been cancelled.', event=event)
-                if attendee.email_notifications:
-                    send_template_email(
-                        subject=f'Event cancelled — {event.title}',
-                        template_name='event_cancelled',
-                        context={'first_name': attendee.first_name or attendee.email, 'event_title': event.title, 'event_date': event_date, 'event_location': event.location, 'browse_url': browse_url},
-                        recipient=attendee.email,
-                    )
+        notify_event_cancelled(event)
         event.delete()
         return JsonResponse({'detail': 'Event deleted successfully.'})
 
@@ -1136,27 +1058,7 @@ def event_detail(request, event_id):
     event.save()
 
     if user.is_staff and old_status != event.approval_status:
-        organizer = event.created_by
-        event_url = f'{settings.FRONTEND_URL}/events/{event.id}'
-        event_date = display_datetime(event.date)
-        if event.approval_status == 'approved':
-            create_notification(organizer, 'event_approved', 'Event approved', f'{event.title} has been approved.', event=event)
-            if organizer.email_notifications:
-                send_template_email(
-                    subject=f'Your event has been approved — {event.title}',
-                    template_name='event_approved',
-                    context={'first_name': organizer.first_name or organizer.email, 'event_title': event.title, 'event_date': event_date, 'event_url': event_url},
-                    recipient=organizer.email,
-                )
-        elif event.approval_status == 'rejected':
-            create_notification(organizer, 'event_rejected', 'Event rejected', f'{event.title} was rejected.', detail=event.rejection_reason, event=event)
-            if organizer.email_notifications:
-                send_template_email(
-                    subject=f'Update on your event — {event.title}',
-                    template_name='event_rejected',
-                    context={'first_name': organizer.first_name or organizer.email, 'event_title': event.title, 'rejection_reason': event.rejection_reason, 'event_url': event_url},
-                    recipient=organizer.email,
-                )
+        notify_event_status_change(event)
 
     return JsonResponse(event_payload(event, request=request, user=user))
 
@@ -1259,14 +1161,7 @@ def toggle_rsvp(request, event_id):
                 RSVP.objects.create(user=user, event=event)
         except IntegrityError:
             return json_error('You have already RSVPed to this event.', status=409)
-    create_notification(user, 'rsvp_confirmed', "You're going!", f'Your RSVP for {event.title} is confirmed.', event=event)
-    if user.email_notifications:
-        send_template_email(
-            subject=f"You're going to {event.title}!",
-            template_name='rsvp_confirmed',
-            context={'first_name': user.first_name or user.email, 'event_title': event.title, 'event_date': display_datetime(event.date), 'event_location': event.location, 'event_url': f'{settings.FRONTEND_URL}/events/{event.id}'},
-            recipient=user.email,
-        )
+    notify_rsvp_confirmed(user, event)
     return JsonResponse(
         {
             'rsvped': True,

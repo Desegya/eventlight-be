@@ -1,12 +1,11 @@
 from datetime import timedelta
 
-from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db.models import Q
 from django.utils import timezone
 
 from api.models import Event, Notification, User
-from api.views import create_notification, display_datetime, send_template_email
+from api.services import notify_event_reminder
 
 
 class Command(BaseCommand):
@@ -33,21 +32,7 @@ class Command(BaseCommand):
                 .exclude(id__in=already_reminded)
                 .distinct()
             )
-            event_url = f'{settings.FRONTEND_URL}/events/{event.id}'
             for user in recipients:
-                create_notification(user, 'reminder', 'Event reminder', f'{event.title} starts soon.', event=event)
-                if user.email_notifications:
-                    send_template_email(
-                        subject=f'Reminder: {event.title} is coming up',
-                        template_name='event_reminder',
-                        context={
-                            'first_name': user.first_name or user.email,
-                            'event_title': event.title,
-                            'event_date': display_datetime(event.date),
-                            'event_location': event.location,
-                            'event_url': event_url,
-                        },
-                        recipient=user.email,
-                    )
+                notify_event_reminder(user, event)
                 sent += 1
         self.stdout.write(self.style.SUCCESS(f'Sent {sent} reminder(s).'))

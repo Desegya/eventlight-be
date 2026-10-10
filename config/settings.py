@@ -89,6 +89,13 @@ DATABASES = {
     )
 }
 
+# Use a file-based SQLite test database. Django 6.0 converts in-memory SQLite
+# test databases to file:memorydb?mode=memory&cache=shared, which breaks
+# TestCase savepoint rollback between tests.
+if DATABASES['default']['ENGINE'] == 'django.db.backends.sqlite3':
+    import tempfile
+    DATABASES['default']['TEST'] = {'NAME': f'{tempfile.gettempdir()}/test_eventlight.sqlite3'}
+
 
 # Password validation
 
@@ -207,6 +214,10 @@ CACHES = {
         {'BACKEND': 'django.core.cache.backends.db.DatabaseCache', 'LOCATION': 'django_cache'}
     ),
 }
+
+# Security headers applied in all environments.
+X_FRAME_OPTIONS = 'DENY'
+SECURE_REFERRER_POLICY = 'same-origin'
 
 REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
