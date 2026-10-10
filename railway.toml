@@ -1,0 +1,13 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Runs once per deploy, before the new version receives traffic.
+preDeployCommand = ["python manage.py migrate --noinput && python manage.py createcachetable"]
+# Liveness endpoint; exempt from the HTTPS redirect. Railway probes it with
+# Host: healthcheck.railway.app, which must be listed in ALLOWED_HOSTS.
+healthcheckPath = "/api/health/"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
