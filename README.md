@@ -961,3 +961,10 @@ committed. The insecure fallback key in `config/settings.py` is used only when
 - There is no edit-event page in the frontend; the API supports `PATCH`.
 - Email is sent from an in-process thread pool; emails queued in a worker that
   is restarted before delivery are lost. Move to a task queue if volume grows.
+
+---
+
+## License
+
+Copyright (c) Desmond Egya. All rights reserved. The code is public to read,
+but it is not open source; see [LICENSE](LICENSE).
